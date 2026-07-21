@@ -1,0 +1,102 @@
+micro_lqr_controller:
+  ros__parameters:
+    # ------------------------------------------------------------
+    # EcatV2_Master topics for sn2031674
+    # ------------------------------------------------------------
+    imu_topic: "/ecat/sn2031674/app1/read"
+    rc_topic: "/ecat/sn2031674/app2/read"
+    left_motor_read_topic: "/ecat/sn2031674/app3/read"
+    left_motor_write_topic: "/ecat/sn2031674/app3/write"
+    right_motor_read_topic: "/ecat/sn2031674/app4/read"
+    right_motor_write_topic: "/ecat/sn2031674/app4/write"
+    debug_topic: "/micro_lqr/debug"
+
+    # The LQR was discretized for 0.003 s, about 333.33 Hz.
+    control_period_s: 0.003
+
+    # ------------------------------------------------------------
+    # First-run safety
+    # ------------------------------------------------------------
+    # true: calculate states and debug output, but keep both motors disabled.
+    # Set false only after confirming topic data and signs.
+    dry_run: false
+
+    # Begin with 0.03-0.05 N*m while held by hand. Increase gradually.
+    torque_limit: 0.12
+    hard_torque_limit: 0.45
+    arm_max_tilt_deg: 18.0
+    fall_cutoff_deg: 25.0
+
+    imu_timeout_s: 0.05
+    motor_timeout_s: 0.05
+    rc_timeout_s: 0.20
+
+    # ------------------------------------------------------------
+    # DJI RC right switch
+    # EcatV2 values: up=1, middle=3, bottom=2.
+    #
+    # Default workflow:
+    #   up(1):     motors disabled; calibrate IMU and wheel zero on entry
+    #   middle(3): arm and run LQR
+    #   bottom(2): disable
+    # ------------------------------------------------------------
+    calibrate_switch_value: 1
+    arm_switch_value: 3
+    disable_switch_value: 2
+
+    # Optional speed command:
+    # target velocity = left_y * max_target_velocity.
+    # The target position is integrated from that velocity.
+    enable_velocity_command: false
+    max_target_velocity: 0.30
+    rc_deadband: 0.08
+
+    # ------------------------------------------------------------
+    # Four-state discrete LQR
+    # State order: [x, x_dot, body_pitch, body_pitch_rate]
+    # u_lqr = -(Kx*x_err + Kv*v_err + Ktheta*theta_err + Kq*q_err)
+    # ------------------------------------------------------------
+    k_x: 0.0 #1.99271299656
+    k_x_dot: 0.0 #0.32543605302
+    k_pitch: 3.48842472039
+    k_pitch_rate: 0.143694284635
+
+    # Whole-controller direction. Change between +1 and -1.
+    output_gain_sign: 1.0
+
+    # Motor command-coordinate signs.
+    left_motor_sign: -1.0
+    right_motor_sign: 1.0
+
+    # Encoder feedback-coordinate signs.
+    left_encoder_sign: 1.0
+    right_encoder_sign: -1.0
+
+    # IMU installation mapping:
+    # relative IMU roll = body pitch
+    # IMU angular_velocity.x = body pitch rate
+    imu_angle_sign: 1.0
+    imu_rate_sign: 1.0
+
+    # Encoder joint angle is relative to the body.
+    # x = r * (mean_unwrapped_joint_angle + sign * pitch)
+    # x_dot = r * (mean_joint_rate + sign * pitch_rate)
+    pitch_position_compensation_sign: 1.0
+    pitch_rate_compensation_sign: 1.0
+
+    wheel_radius_m: 0.030
+
+    # Your Ecat config uses conf_pmax=pi, so feedback position wraps
+    # approximately from -pi to +pi.
+    motor_position_wrap_half_range: 3.141592653589793
+
+    # ------------------------------------------------------------
+    # Measurement filtering
+    # ------------------------------------------------------------
+    pitch_filter_hz: 40.0
+    pitch_rate_filter_hz: 25.0
+    wheel_velocity_filter_hz: 30.0
+
+    # Set true only when you deliberately want the robot to arm without
+    # first putting the RC switch in the calibration position.
+    auto_calibrate_on_first_valid_data: false

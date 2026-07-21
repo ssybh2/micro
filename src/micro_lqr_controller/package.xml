@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>micro_lqr_controller</name>
+  <version>0.1.0</version>
+  <description>
+    Four-state LQR balance controller for a two-wheel robot using
+    AIMEtherCAT/EcatV2_Master custom messages.
+  </description>
+
+  <maintainer email="uonaim@example.com">uonaim</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>custom_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

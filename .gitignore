@@ -1,0 +1,23 @@
+# ROS 2 / colcon generated directories
+build/
+install/
+log/
+
+# ROS bag files
+*.bag
+*.db3
+*.mcap
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Editors
+.vscode/
+.idea/
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
