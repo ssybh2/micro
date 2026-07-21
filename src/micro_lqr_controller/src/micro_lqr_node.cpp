@@ -846,7 +846,7 @@ private:
     RCLCPP_INFO_THROTTLE(
       get_logger(),
       *get_clock(),
-      500,
+      20,
       "armed=%d dry=%d x=%+.4f v=%+.4f pitch=%+.2fdeg "
       "rate=%+.3f u=%+.4f L=%+.4f R=%+.4f",
       armed_ ? 1 : 0,
