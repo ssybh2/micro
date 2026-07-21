@@ -59,7 +59,7 @@ micro_lqr_controller:
     k_x: 0.0 #1.99271299656
     k_x_dot: 0.0 #0.32543605302
     k_pitch: 1.3 #3.48842472039
-    k_pitch_rate: 0.02 #3694284635
+    k_pitch_rate: 0.05 #3694284635
 
     # Whole-controller direction. Change between +1 and -1.
     output_gain_sign: 1.0

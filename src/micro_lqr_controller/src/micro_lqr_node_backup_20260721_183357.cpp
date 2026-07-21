@@ -695,32 +695,6 @@ private:
 
   void control_step()
   {
-    // Measure the real timer interval with a monotonic clock.
-    const auto steady_now =
-      std::chrono::steady_clock::now();
-
-    double actual_dt = control_period_s_;
-
-    if (control_time_initialized_) {
-      actual_dt =
-        std::chrono::duration<double>(
-        steady_now - last_control_steady_time_).count();
-    }
-
-    last_control_steady_time_ = steady_now;
-    control_time_initialized_ = true;
-
-    if (!std::isfinite(actual_dt) || actual_dt <= 0.0) {
-      actual_dt = control_period_s_;
-    }
-
-    // Prevent exceptional scheduling delays from corrupting
-    // filters and reference integration.
-    actual_dt = clamp_value(
-      actual_dt,
-      0.0005,
-      0.020);
-
     std::lock_guard<std::mutex> lock(data_mutex_);
     const rclcpp::Time current_time = now();
 
@@ -1069,11 +1043,6 @@ private:
 
   double target_position_m_{0.0};
   double target_velocity_mps_{0.0};
-
-  std::chrono::steady_clock::time_point
-    last_control_steady_time_{};
-
-  bool control_time_initialized_{false};
 
   std::string imu_topic_;
   std::string rc_topic_;
