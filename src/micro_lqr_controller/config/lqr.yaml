@@ -18,7 +18,7 @@ micro_lqr_controller:
     # therefore total model torque is limited to 2*torque_limit.
     torque_limit: 0.12
     hard_torque_limit: 0.45
-    lqr_gain_scale: 0.5
+    lqr_gain_scale: 0.4
 
     arm_max_tilt_deg: 20.0
     arm_max_pitch_rate_rad_s: 0.20
@@ -70,19 +70,19 @@ micro_lqr_controller:
     # Discrete LQR cost: sum(x'Qx + u'Ru), u is total axle torque.
     # Runtime computes Ad/Bd by exact ZOH and solves the DARE at startup.
     lqr.q_pitch: 1.0
-    lqr.q_pitch_rate: 0.01
-    lqr.q_position: 0.3
-    lqr.q_velocity: 0.1
+    lqr.q_pitch_rate: 0.001
+    lqr.q_position: 0.7
+    lqr.q_velocity: 0.35
     # R=10 is intentionally more conservative than the course R=1.
     lqr.r_total_torque: 20.0
     lqr.dare_max_iterations: 20000
     lqr.dare_tolerance: 1.0e-12
 
     # Normally leave false. This exists only for controlled comparison.
-    lqr.use_manual_gain: false
-    lqr.manual_k_pitch: 0.0
-    lqr.manual_k_pitch_rate: 0.0
-    lqr.manual_k_position: 0.0
+    lqr.use_manual_gain: true
+    lqr.manual_k_pitch: -2.7
+    lqr.manual_k_pitch_rate: -0.1
+    lqr.manual_k_position: -0.9
     lqr.manual_k_velocity: 0.0
 
     motor_position_wrap_half_range: 3.141592653589793
