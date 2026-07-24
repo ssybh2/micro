@@ -1,76 +1,59 @@
-# micro_lqr_controller
+# micro_lqr_controller — standard discrete LQR replacement
 
-ROS 2 Humble C++ controller for the fixed-leg two-wheel robot using
-`AIMEtherCAT/EcatV2_Master`.
+This package replaces the former hand-entered four-gain controller with a complete model-based digital LQR pipeline:
 
-## Signal mapping
+1. construct the continuous linearized inverted-pendulum/cart model;
+2. use exact zero-order-hold discretization at `control_period_s`;
+3. verify controllability;
+4. solve the discrete algebraic Riccati equation (DARE);
+5. calculate `K` at node startup;
+6. execute `u_total = -K * state_error` at 333.333 Hz;
+7. split total axle torque equally between the two wheel motors.
 
-```text
-app1/read  sensor_msgs/msg/Imu
-app2/read  custom_msgs/msg/ReadDJIRC
-app3/read  custom_msgs/msg/ReadDmMotor
-app3/write custom_msgs/msg/WriteDmMotorMITControl
-app4/read  custom_msgs/msg/ReadDmMotor
-app4/write custom_msgs/msg/WriteDmMotorMITControl
-```
-
-The IMU installation is handled as:
+The state order follows the supplied course code:
 
 ```text
-body pitch      = relative IMU roll
-body pitch rate = IMU angular_velocity.x
+[pitch, pitch_rate, x, x_dot]
 ```
 
-The four-state vector is:
+The model input is explicitly defined as:
 
 ```text
-[x, x_dot, body_pitch, body_pitch_rate]
+u_total = left-wheel forward torque + right-wheel forward torque
 ```
 
-The output is pure MIT torque:
+Therefore each wheel receives `0.5*u_total` before applying mirrored motor signs.
 
-```text
-enable = 1
-p_des = 0
-v_des = 0
-kp = 0
-kd = 0
-torque = LQR result
-```
+## Important model assumption
 
-## Copy into the existing workspace
+The default YAML uses values previously stated for the robot:
 
-The ZIP contains:
+- total mass about 2.8 kg;
+- two wheel assemblies about 0.13 kg each;
+- wheel radius 0.03 m;
+- axle-to-COM distance about 0.12 m.
 
-```text
-micro_lqr_ros2_ws/
-└── src/
-    └── micro_lqr_controller/
-```
+`model.body_pitch_inertia_kg_m2` is currently the course-style approximation `I=m*h^2`. Replace it with the Inventor/CAD inertia about the **body COM pitch axis** before final tuning.
 
-You can either build it as a separate overlay workspace or copy the package into
-the existing EcatV2 workspace.
+## Build
 
-Separate overlay example:
+Install Eigen if required:
 
 ```bash
-cd /home/uonaim
-unzip micro_lqr_ros2_ws.zip
+sudo apt update
+sudo apt install libeigen3-dev
+```
 
+Build this overlay after the workspace that provides `custom_msgs`:
+
+```bash
 source /opt/ros/humble/setup.bash
-
-# Source the workspace in which EcatV2_Master/custom_msgs is already built.
 source /home/uonaim/micro/install/setup.bash
 
-cd /home/uonaim/micro_lqr_ros2_ws
+cd /home/uonaim/micro_lqr_standard_ws
+rm -rf build install log
 colcon build --symlink-install --packages-select micro_lqr_controller
 source install/setup.bash
-```
-
-Check interfaces and topic types:
-
-```bash
-ros2 run micro_lqr_controller check_topics.sh
 ```
 
 Launch:
@@ -79,177 +62,183 @@ Launch:
 ros2 launch micro_lqr_controller micro_lqr.launch.py
 ```
 
-## First-run RC workflow
-
-DJI switch values are:
+With the default model and `R=10`, startup should print a gain close to:
 
 ```text
-up     = 1
-middle = 3
-bottom = 2
+K=[-3.08055268 -0.51371579 -0.29873677 -0.47617184]
 ```
 
-Default behavior:
+Small differences from Eigen iteration tolerances are normal.
 
-```text
-up:     disable motors and calibrate the current upright IMU/wheel zero
-middle: arm LQR
-bottom: disable motors
-```
+## First hardware run
 
-Start with the robot supported by hand.
-
-1. Put the right switch at bottom.
-2. Start EcatV2_Master and this controller.
-3. Put the right switch at up while the robot is physically upright.
-4. Put the right switch at middle.
-5. Initially `dry_run=true`, so motors remain disabled. Check `/micro_lqr/debug`.
-6. Confirm angle/rate/encoder signs.
-7. Set `dry_run=false`; the parameter change automatically disarms.
-8. Move the switch away from middle and back to middle to re-arm.
-
-## Dry run
-
-The default configuration does not enable either motor:
+Keep the robot supported and keep:
 
 ```yaml
 dry_run: true
 torque_limit: 0.05
 ```
 
-Observe the state and predicted torque:
+Start EtherCAT first, then start this node. Use the right RC switch:
+
+```text
+up (1)     calibrate current upright IMU and wheel zero
+middle (3) arm
+bottom (2) disable
+```
+
+### State sign test
+
+Observe:
 
 ```bash
 ros2 topic echo /micro_lqr/debug
 ```
 
-Debug array order:
+The critical fields are:
 
 ```text
 0  x
-1  x_dot
-2  pitch rad
-3  pitch_rate rad/s
-4  target_x
-5  target_velocity
-6  raw_lqr_output
-7  common_torque_after_sign_and_limit
-8  armed
-9  dry_run
-10 output_gain_sign
-11 torque_limit
+1  x_dot used by LQR
+2  pitch
+3  pitch_rate
+24 left raw position
+25 right raw position
+26 left raw velocity
+27 right raw velocity
+28 x_dot from position finite difference
+35 x_dot from motor velocity
+36 motor-based minus finite-difference velocity
 ```
 
-Enable real output:
+Verify all of these before enabling motors:
+
+1. Push the complete upright robot in the defined positive-forward direction: `x` and both velocity estimates must become positive.
+2. Tip the body in the defined positive pitch direction: `pitch` must become positive.
+3. Move it in the same rotational direction: `pitch_rate` must become positive.
+4. Hold wheel contact approximately fixed and rotate only the body: compensated `x` and `x_dot` should stay near zero.
+
+Correct measurement signs with:
+
+```yaml
+left_encoder_sign
+right_encoder_sign
+imu_angle_sign
+imu_rate_sign
+pitch_position_compensation_sign
+pitch_rate_compensation_sign
+```
+
+### Actuator sign test
+
+The model defines positive `u_total` as the torque direction that should increase positive `x_dot` near upright. If hardware produces the opposite acceleration, flip only:
+
+```yaml
+output_gain_sign: -1.0
+```
+
+Do **not** repair an actuator sign error by changing individual components of `K`. The node computes one mathematically consistent `K`; hardware mapping is isolated in `output_gain_sign` and the two motor signs.
+
+After signs are verified:
 
 ```bash
 ros2 param set /micro_lqr_controller dry_run false
 ```
 
-## Change the complete output direction
+This disarms the node. Move the RC switch away from ARM and back to ARM.
 
-The requested adjustable sign is available as a live ROS parameter:
+## LQR tuning
+
+The cost is:
+
+```text
+sum(x'Qx + u'Ru)
+```
+
+with:
+
+```text
+Q = diag(q_pitch, q_pitch_rate, q_position, q_velocity)
+R = r_total_torque
+```
+
+General effects:
+
+- increase `q_pitch`: stronger upright-angle correction;
+- increase `q_pitch_rate`: stronger angular-rate damping;
+- increase `q_position`: stronger return to the arm position;
+- increase `q_velocity`: stronger longitudinal-speed damping;
+- increase `r_total_torque`: gentler, lower-torque control;
+- decrease `r_total_torque`: more aggressive control.
+
+Model or Q/R changes require editing YAML and restarting the node. Runtime parameters intended for cautious testing are:
 
 ```bash
+ros2 param set /micro_lqr_controller torque_limit 0.03
+ros2 param set /micro_lqr_controller lqr_gain_scale 0.7
 ros2 param set /micro_lqr_controller output_gain_sign -1.0
 ```
 
-or:
+Every such change disarms the controller.
 
-```bash
-ros2 param set /micro_lqr_controller output_gain_sign 1.0
+## MATLAB verification
+
+Open:
+
+```text
+tools/design_lqr.m
 ```
 
-Changing this parameter disarms the controller. Cycle the RC switch before
-arming again.
+It builds the same model, performs exact ZOH discretization, calls `dlqr`, prints `K`, checks controllability, and simulates a small initial pitch error.
 
-The global sign is separate from the mirrored motor command signs:
+The original uploaded course file is retained at:
 
-```yaml
-output_gain_sign: 1.0
-left_motor_sign: -1.0
-right_motor_sign: 1.0
+```text
+reference/course_wheel_control_original.m
 ```
 
-## Increase torque gradually
+The parameter `model.use_course_legacy_b4` reproduces its exact fourth `B` entry. The default `false` uses the standard coefficient obtained by solving the coupled cart-pole equations.
 
-The hardware peak torque is kept as an absolute limit:
+## Debug array
 
-```yaml
-hard_torque_limit: 0.45
-```
+`/micro_lqr/debug` is `std_msgs/msg/Float64MultiArray`:
 
-The initial operational limit is deliberately small:
+| Index | Meaning |
+|---:|---|
+| 0 | x [m] |
+| 1 | x_dot used by LQR [m/s] |
+| 2 | pitch [rad] |
+| 3 | pitch_rate [rad/s] |
+| 4 | target x [m] |
+| 5 | target x_dot [m/s] |
+| 6 | unsaturated model total axle torque [N m] |
+| 7 | common per-wheel torque after output sign and limit [N m] |
+| 8 | armed |
+| 9 | dry_run |
+| 10 | output_gain_sign |
+| 11 | per-wheel torque limit |
+| 12 | raw pitch |
+| 13 | raw pitch rate |
+| 14 | position-state torque contribution |
+| 15 | velocity-state torque contribution |
+| 16 | pitch-state torque contribution |
+| 17 | pitch-rate-state torque contribution |
+| 18 | limited total axle torque |
+| 19 | saturation flag |
+| 20 | actual control dt |
+| 21–23 | IMU/left/right message ages |
+| 24–27 | raw motor positions and velocities |
+| 28 | x_dot from finite difference |
+| 29 | position error |
+| 30 | velocity error |
+| 31–34 | K in state order `[pitch,pitch_rate,x,x_dot]` |
+| 35 | motor-feedback x_dot |
+| 36 | velocity-estimator mismatch |
+| 37 | controllability rank |
+| 38 | largest closed-loop pole magnitude |
+| 39 | lqr_gain_scale |
+| 40 | course legacy B4 flag |
 
-```yaml
-torque_limit: 0.05
-```
+## Safety
 
-Raise gradually while supporting the robot:
-
-```bash
-ros2 param set /micro_lqr_controller torque_limit 0.10
-ros2 param set /micro_lqr_controller torque_limit 0.20
-ros2 param set /micro_lqr_controller torque_limit 0.30
-ros2 param set /micro_lqr_controller torque_limit 0.45
-```
-
-Each change disarms the controller.
-
-## Encoder signs
-
-If pushing the robot physically forward does not produce positive `x_dot`,
-change one or both:
-
-```yaml
-left_encoder_sign: 1.0
-right_encoder_sign: -1.0
-```
-
-The DM position feedback is unwrapped across ±P_MAX. Your EtherCAT config uses
-`conf_pmax=pi`, so:
-
-```yaml
-motor_position_wrap_half_range: 3.141592653589793
-```
-
-## IMU signs
-
-When the body tips in the defined positive pitch direction, `pitch` and
-`pitch_rate` in the debug topic should use the same physical sign. Adjust:
-
-```yaml
-imu_angle_sign: 1.0
-imu_rate_sign: 1.0
-```
-
-## Optional remote velocity command
-
-Disabled by default:
-
-```yaml
-enable_velocity_command: false
-```
-
-When enabled, `left_y` controls target forward speed and the position reference
-is integrated from that speed:
-
-```bash
-ros2 param set /micro_lqr_controller enable_velocity_command true
-```
-
-## Safety actions
-
-The node sends `enable=0` and zero torque when any of these occurs:
-
-- RC, IMU, or motor feedback timeout;
-- RC offline;
-- either motor offline;
-- DM motor over/under-voltage, overcurrent, temperature, communication, or
-  overload fault;
-- right switch not in ARM;
-- pitch exceeds `fall_cutoff_deg`;
-- invalid quaternion;
-- a sensitive parameter is changed.
-
-After a fault or parameter change, cycle the RC switch before re-arming.
+The controller disables motor output on stale messages, offline RC/motors, motor fault flags, invalid IMU data, RC switch leaving ARM, or fall-angle violation. `hard_torque_limit` remains the final absolute per-wheel clamp.

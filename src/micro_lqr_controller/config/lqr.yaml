@@ -1,8 +1,6 @@
 micro_lqr_controller:
   ros__parameters:
-    # ------------------------------------------------------------
     # EcatV2_Master topics for sn2031674
-    # ------------------------------------------------------------
     imu_topic: "/ecat/sn2031674/app1/read"
     rc_topic: "/ecat/sn2031674/app2/read"
     left_motor_read_topic: "/ecat/sn2031674/app3/read"
@@ -11,93 +9,87 @@ micro_lqr_controller:
     right_motor_write_topic: "/ecat/sn2031674/app4/write"
     debug_topic: "/micro_lqr/debug"
 
-    # The LQR was discretized for 0.003 s, about 333.33 Hz.
+    # 333.333 Hz digital controller
     control_period_s: 0.003
 
-    # ------------------------------------------------------------
-    # First-run safety
-    # ------------------------------------------------------------
-    # true: calculate states and debug output, but keep both motors disabled.
-    # Set false only after confirming topic data and signs.
+    # First test MUST use dry_run=true. After sign checks, set false.
     dry_run: false
-
-    # Begin with 0.03-0.05 N*m while held by hand. Increase gradually.
+    # Per-wheel MIT torque limit. The LQR model input is total axle torque,
+    # therefore total model torque is limited to 2*torque_limit.
     torque_limit: 0.12
     hard_torque_limit: 0.45
-    arm_max_tilt_deg: 18.0
+    lqr_gain_scale: 0.5
+
+    arm_max_tilt_deg: 20.0
     arm_max_pitch_rate_rad_s: 0.20
     fall_cutoff_deg: 25.0
-
     imu_timeout_s: 0.05
     motor_timeout_s: 0.05
     rc_timeout_s: 0.20
 
-    # ------------------------------------------------------------
-    # DJI RC right switch
-    # EcatV2 values: up=1, middle=3, bottom=2.
-    #
-    # Default workflow:
-    #   up(1):     motors disabled; calibrate IMU and wheel zero on entry
-    #   middle(3): arm and run LQR
-    #   bottom(2): disable
-    # ------------------------------------------------------------
+    # DJI RC: up=1 calibrate, middle=3 arm, bottom=2 disable
     calibrate_switch_value: 1
     arm_switch_value: 3
     disable_switch_value: 2
 
-    # Optional speed command:
-    # target velocity = left_y * max_target_velocity.
-    # The target position is integrated from that velocity.
     enable_velocity_command: false
     max_target_velocity: 0.30
     rc_deadband: 0.08
 
-    # ------------------------------------------------------------
-    # Four-state discrete LQR
-    # State order: [x, x_dot, body_pitch, body_pitch_rate]
-    # u_lqr = -(Kx*x_err + Kv*v_err + Ktheta*theta_err + Kq*q_err)
-    # ------------------------------------------------------------
-    k_x: 0.3 #1.99271299656
-    k_x_dot: -0.12 #0.32543605302
-    k_pitch: 0.9 #3.48842472039
-    k_pitch_rate: 0.1 #3694284635
-
-    # Whole-controller direction. Change between +1 and -1.
-    output_gain_sign: 1.0
-
-    # Motor command-coordinate signs.
+    # Hardware coordinate mapping. Do not repair a sign error by changing
+    # individual LQR gains. First make all measured states physically positive,
+    # then flip only output_gain_sign if positive model torque drives x_dot negative.
+    output_gain_sign: -1.0
     left_motor_sign: -1.0
     right_motor_sign: 1.0
-
-    # Encoder feedback-coordinate signs.
     left_encoder_sign: 1.0
     right_encoder_sign: -1.0
-
-    # IMU installation mapping:
-    # relative IMU roll = body pitch
-    # IMU angular_velocity.x = body pitch rate
     imu_angle_sign: 1.0
     imu_rate_sign: 1.0
-
-    # Encoder joint angle is relative to the body.
-    # x = r * (mean_unwrapped_joint_angle + sign * pitch)
-    # x_dot = r * (mean_joint_rate + sign * pitch_rate)
     pitch_position_compensation_sign: 1.0
     pitch_rate_compensation_sign: 1.0
 
-    wheel_radius_m: 0.030
+    # Linearized inverted-pendulum/cart model.
+    # State order: [pitch, pitch_rate, x, x_dot]
+    # Input: TOTAL axle torque = left forward torque + right forward torque.
+    # Defaults use your previously stated 2.8 kg total mass, 0.13 kg per wheel,
+    # 30 mm wheel radius and approximately 120 mm COM height.
+    model.body_mass_kg: 1.0
+    model.non_pitch_mass_kg: 0.09
+    model.wheel_inertia_each_kg_m2: 2.8551e-5
+    model.com_height_m: 0.095
+    # Replace this with Inventor inertia about body COM around pitch axis.
+    # Current value follows the course approximation I=m*h^2.
+    model.body_pitch_inertia_kg_m2: 0.0057245
+    model.wheel_radius_m: 0.030
+    model.gravity_mps2: 9.80665
+    # false uses the standard cart-pole x-acceleration input coefficient.
+    # true reproduces the exact B(4) expression in the uploaded course file.
+    model.use_course_legacy_b4: false
 
-    # Your Ecat config uses conf_pmax=pi, so feedback position wraps
-    # approximately from -pi to +pi.
+    # Discrete LQR cost: sum(x'Qx + u'Ru), u is total axle torque.
+    # Runtime computes Ad/Bd by exact ZOH and solves the DARE at startup.
+    lqr.q_pitch: 1.0
+    lqr.q_pitch_rate: 0.01
+    lqr.q_position: 0.3
+    lqr.q_velocity: 0.1
+    # R=10 is intentionally more conservative than the course R=1.
+    lqr.r_total_torque: 20.0
+    lqr.dare_max_iterations: 20000
+    lqr.dare_tolerance: 1.0e-12
+
+    # Normally leave false. This exists only for controlled comparison.
+    lqr.use_manual_gain: false
+    lqr.manual_k_pitch: 0.0
+    lqr.manual_k_pitch_rate: 0.0
+    lqr.manual_k_position: 0.0
+    lqr.manual_k_velocity: 0.0
+
     motor_position_wrap_half_range: 3.141592653589793
-
-    # ------------------------------------------------------------
-    # Measurement filtering
-    # ------------------------------------------------------------
     pitch_filter_hz: 40.0
     pitch_rate_filter_hz: 25.0
     wheel_velocity_filter_hz: 30.0
-
-    # Set true only when you deliberately want the robot to arm without
-    # first putting the RC switch in the calibration position.
+    # 1.0 = motor velocity state; 0.0 = position finite difference.
+    velocity_blend: 1.0
+    velocity_mismatch_warn_mps: 0.50
     auto_calibrate_on_first_valid_data: false

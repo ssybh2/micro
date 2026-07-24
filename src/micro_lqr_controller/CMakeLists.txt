@@ -11,10 +11,10 @@ find_package(rcl_interfaces REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(custom_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 add_executable(micro_lqr_node src/micro_lqr_node.cpp)
 target_compile_features(micro_lqr_node PUBLIC cxx_std_17)
-
 ament_target_dependencies(
   micro_lqr_node
   rclcpp
@@ -23,6 +23,7 @@ ament_target_dependencies(
   std_msgs
   custom_msgs
 )
+target_link_libraries(micro_lqr_node Eigen3::Eigen)
 
 install(TARGETS
   micro_lqr_node
@@ -32,6 +33,8 @@ install(TARGETS
 install(DIRECTORY
   config
   launch
+  tools
+  reference
   DESTINATION share/${PROJECT_NAME}
 )
 

@@ -14,7 +14,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "config",
             default_value=default_config,
-            description="Path to the controller YAML file",
+            description="Path to the standard LQR controller YAML file",
         ),
         Node(
             package="micro_lqr_controller",
