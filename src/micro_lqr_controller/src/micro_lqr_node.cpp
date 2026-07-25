@@ -41,6 +41,15 @@ double clamp_value(const double value, const double lower, const double upper)
   return std::max(lower, std::min(upper, value));
 }
 
+double apply_continuous_deadband(const double value, const double deadband)
+{
+  const double magnitude = std::abs(value);
+  if (magnitude <= deadband) {
+    return 0.0;
+  }
+  return std::copysign(magnitude - deadband, value);
+}
+
 double sign_or_throw(const double value, const std::string & name)
 {
   if (!std::isfinite(value) || std::abs(std::abs(value) - 1.0) > 1.0e-9) {
@@ -198,6 +207,7 @@ struct ImuSample
 {
   Quaternion orientation{};
   double gyro_x{0.0};
+  double gyro_z{0.0};
   rclcpp::Time received_time{0, 0, RCL_ROS_TIME};
   bool received{false};
 };
@@ -420,6 +430,22 @@ struct DebugSample
   double position_integral{0.0};
   double attitude_error{0.0};
   double outer_saturation_flag{0.0};
+
+  // Yaw-rate damping extension. Indices are appended to preserve all legacy fields.
+  double yaw_enabled_flag{0.0};
+  double yaw_rate_raw{0.0};
+  double yaw_rate_filtered{0.0};
+  double yaw_rate_for_control{0.0};
+  double yaw_rate_error{0.0};
+  double yaw_acceleration_filtered{0.0};
+  double yaw_differential_raw{0.0};
+  double yaw_differential_command{0.0};
+  double yaw_available_headroom{0.0};
+  double yaw_limited_flag{0.0};
+  double left_physical_torque{0.0};
+  double right_physical_torque{0.0};
+  double left_motor_command{0.0};
+  double right_motor_command{0.0};
 };
 
 }  // namespace
@@ -446,6 +472,7 @@ public:
           msg->orientation.w, msg->orientation.x,
           msg->orientation.y, msg->orientation.z};
         imu_.gyro_x = msg->angular_velocity.x;
+        imu_.gyro_z = msg->angular_velocity.z;
         imu_.received_time = now();
         imu_.received = true;
       });
@@ -499,6 +526,13 @@ public:
     RCLCPP_INFO(
       get_logger(), "RC right switch: calibrate=%d, arm=%d, disable=%d",
       calibrate_switch_value_, arm_switch_value_, disable_switch_value_);
+    RCLCPP_INFO(
+      get_logger(),
+      "yaw-rate damping: enabled=%s; no angle hold; Kp=%.5f Nm/(rad/s) per wheel; "
+      "deadband=%.4f rad/s; diff_limit=%.4f Nm; imu_sign=%+.0f output_sign=%+.0f",
+      yaw_enable_ ? "true" : "false", yaw_rate_kp_per_wheel_nm_per_rad_s_,
+      yaw_rate_deadband_rad_s_, yaw_differential_torque_limit_nm_,
+      yaw_imu_rate_sign_, yaw_output_sign_);
   }
 
   ~MicroLqrController() override
@@ -573,6 +607,26 @@ private:
     pitch_rate_compensation_sign_ = sign_or_throw(
       declare_parameter<double>("pitch_rate_compensation_sign", 1.0),
       "pitch_rate_compensation_sign");
+
+    // Pure yaw-rate damping: target yaw rate is always zero. No yaw angle is stored.
+    yaw_enable_ = declare_parameter<bool>("yaw.enable", true);
+    yaw_imu_rate_sign_ = sign_or_throw(
+      declare_parameter<double>("yaw.imu_rate_sign", 1.0), "yaw.imu_rate_sign");
+    yaw_output_sign_ = sign_or_throw(
+      declare_parameter<double>("yaw.output_sign", 1.0), "yaw.output_sign");
+    yaw_rate_kp_per_wheel_nm_per_rad_s_ = declare_parameter<double>(
+      "yaw.rate_kp_per_wheel_nm_per_rad_s", 0.015);
+    yaw_rate_kd_per_wheel_nm_per_rad_s2_ = declare_parameter<double>(
+      "yaw.rate_kd_per_wheel_nm_per_rad_s2", 0.0);
+    yaw_rate_deadband_rad_s_ = declare_parameter<double>(
+      "yaw.rate_deadband_rad_s", 0.02);
+    yaw_rate_filter_hz_ = declare_parameter<double>("yaw.rate_filter_hz", 15.0);
+    yaw_acceleration_filter_hz_ = declare_parameter<double>(
+      "yaw.acceleration_filter_hz", 8.0);
+    yaw_differential_torque_limit_nm_ = declare_parameter<double>(
+      "yaw.differential_torque_limit_nm", 0.025);
+    yaw_differential_slew_rate_nm_s_ = declare_parameter<double>(
+      "yaw.differential_slew_rate_nm_s", 0.50);
 
     wheel_radius_m_ = declare_parameter<double>("model.wheel_radius_m", 0.030);
     body_mass_kg_ = declare_parameter<double>("model.body_mass_kg", 2.54);
@@ -675,6 +729,23 @@ private:
       throw std::runtime_error("rc_deadband must be in [0,1)");
     }
     if (
+      !std::isfinite(yaw_rate_kp_per_wheel_nm_per_rad_s_) ||
+      yaw_rate_kp_per_wheel_nm_per_rad_s_ < 0.0 ||
+      !std::isfinite(yaw_rate_kd_per_wheel_nm_per_rad_s2_) ||
+      yaw_rate_kd_per_wheel_nm_per_rad_s2_ < 0.0 ||
+      !std::isfinite(yaw_rate_deadband_rad_s_) || yaw_rate_deadband_rad_s_ < 0.0 ||
+      !std::isfinite(yaw_rate_filter_hz_) || yaw_rate_filter_hz_ < 0.0 ||
+      !std::isfinite(yaw_acceleration_filter_hz_) || yaw_acceleration_filter_hz_ < 0.0 ||
+      !std::isfinite(yaw_differential_torque_limit_nm_) ||
+      yaw_differential_torque_limit_nm_ < 0.0 ||
+      yaw_differential_torque_limit_nm_ > per_wheel_torque_limit_ ||
+      !std::isfinite(yaw_differential_slew_rate_nm_s_) ||
+      yaw_differential_slew_rate_nm_s_ <= 0.0)
+    {
+      throw std::runtime_error(
+        "yaw gains/filters/limits are invalid; differential torque must be <= torque_limit");
+    }
+    if (
       !std::isfinite(cascade_attitude_k_pitch_) || cascade_attitude_k_pitch_ <= 0.0 ||
       !std::isfinite(cascade_attitude_k_pitch_rate_) || cascade_attitude_k_pitch_rate_ < 0.0 ||
       !std::isfinite(cascade_position_kp_rad_per_m_) || cascade_position_kp_rad_per_m_ < 0.0 ||
@@ -701,6 +772,8 @@ private:
     pitch_rate_filter_.configure(pitch_rate_filter_hz_, control_period_s_);
     wheel_velocity_filter_.configure(wheel_velocity_filter_hz_, control_period_s_);
     outer_velocity_filter_.configure(cascade_outer_velocity_filter_hz_, control_period_s_);
+    yaw_rate_filter_.configure(yaw_rate_filter_hz_, control_period_s_);
+    yaw_acceleration_filter_.configure(yaw_acceleration_filter_hz_, control_period_s_);
   }
 
   RowVector4 cascade_equivalent_k() const
@@ -841,6 +914,18 @@ private:
     control_time_initialized_ = false;
     cascade_pitch_setpoint_rad_ = 0.0;
     cascade_position_integral_m_s_ = 0.0;
+    yaw_rate_initialized_ = false;
+    last_yaw_rate_filtered_rad_s_ = 0.0;
+    yaw_differential_command_nm_ = 0.0;
+  }
+
+  void reset_yaw_filters(const double yaw_rate_raw = 0.0)
+  {
+    yaw_rate_filter_.reset(yaw_rate_raw);
+    yaw_acceleration_filter_.reset(0.0);
+    yaw_rate_initialized_ = true;
+    last_yaw_rate_filtered_rad_s_ = yaw_rate_raw;
+    yaw_differential_command_nm_ = 0.0;
   }
 
   void calibrate_zero()
@@ -859,6 +944,7 @@ private:
     wheel_velocity_filter_.reset(0.0);
     outer_velocity_filter_.reset(0.0);
     reset_controller_states();
+    reset_yaw_filters(0.0);
     calibrated_ = true;
     armed_ = false;
     arm_transition_required_ = true;
@@ -874,6 +960,8 @@ private:
     position_fd_initialized_ = false;
     cascade_pitch_setpoint_rad_ = 0.0;
     cascade_position_integral_m_s_ = 0.0;
+    yaw_differential_command_nm_ = 0.0;
+    yaw_rate_initialized_ = false;
     if (require_switch_cycle) {
       arm_transition_required_ = true;
     }
@@ -889,8 +977,14 @@ private:
       return;
     }
     const double pitch_rate_raw = imu_rate_sign_ * imu_.gyro_x;
+    const double yaw_rate_raw = yaw_imu_rate_sign_ * imu_.gyro_z;
     if (!std::isfinite(pitch_rate_raw)) {
       RCLCPP_WARN(get_logger(), "Arm rejected: invalid pitch rate");
+      arm_transition_required_ = true;
+      return;
+    }
+    if (!std::isfinite(yaw_rate_raw)) {
+      RCLCPP_WARN(get_logger(), "Arm rejected: invalid yaw rate");
       arm_transition_required_ = true;
       return;
     }
@@ -925,6 +1019,7 @@ private:
     pitch_rate_filter_.reset(pitch_rate_raw);
     wheel_velocity_filter_.reset(mean_relative_rate_raw);
     outer_velocity_filter_.reset(0.0);
+    reset_yaw_filters(yaw_rate_raw);
     last_position_m_ = target_position_m_;
     position_fd_initialized_ = true;
     control_time_initialized_ = false;
@@ -934,9 +1029,10 @@ private:
     arm_transition_required_ = false;
     RCLCPP_INFO(
       get_logger(),
-      "%s armed; target_position=%.5f m; pitch=%+.3fdeg; rate=%+.3frad/s; dry_run=%s",
+      "%s armed; target_position=%.5f m; pitch=%+.3fdeg; rate=%+.3frad/s; "
+      "yaw_rate=%+.3frad/s; dry_run=%s",
       cascade_mode() ? "CASCADE" : "LQR", target_position_m_, pitch * 180.0 / kPi,
-      pitch_rate_raw, dry_run_ ? "true" : "false");
+      pitch_rate_raw, yaw_rate_raw, dry_run_ ? "true" : "false");
   }
 
   double process_rc_velocity_command() const
@@ -1043,6 +1139,68 @@ private:
     return u_total;
   }
 
+  double calculate_yaw_differential_torque(
+    const double yaw_rate_raw,
+    const double per_wheel_common_torque,
+    const double actual_dt,
+    DebugSample & debug)
+  {
+    const double yaw_rate_filtered = yaw_rate_filter_.update(yaw_rate_raw, actual_dt);
+
+    double yaw_acceleration_raw = 0.0;
+    if (yaw_rate_initialized_) {
+      yaw_acceleration_raw =
+        (yaw_rate_filtered - last_yaw_rate_filtered_rad_s_) / std::max(actual_dt, 1.0e-6);
+    }
+    last_yaw_rate_filtered_rad_s_ = yaw_rate_filtered;
+    yaw_rate_initialized_ = true;
+    const double yaw_acceleration_filtered =
+      yaw_acceleration_filter_.update(yaw_acceleration_raw, actual_dt);
+
+    const double yaw_rate_for_control = apply_continuous_deadband(
+      yaw_rate_filtered, yaw_rate_deadband_rad_s_);
+    const double yaw_rate_error = -yaw_rate_for_control;
+    const double yaw_differential_raw = yaw_enable_ ? yaw_output_sign_ * (
+      yaw_rate_kp_per_wheel_nm_per_rad_s_ * yaw_rate_error -
+      yaw_rate_kd_per_wheel_nm_per_rad_s2_ * yaw_acceleration_filtered) : 0.0;
+
+    // Balance/translation has priority. Yaw only consumes the remaining per-wheel headroom.
+    const double yaw_available_headroom = std::max(
+      0.0, per_wheel_torque_limit_ - std::abs(per_wheel_common_torque));
+    const double yaw_allowed = std::min(
+      yaw_differential_torque_limit_nm_, yaw_available_headroom);
+    const double yaw_target = clamp_value(
+      yaw_differential_raw, -yaw_allowed, yaw_allowed);
+
+    const bool zero_rate_release =
+      std::abs(yaw_rate_for_control) <= 1.0e-12;
+    if (!yaw_enable_ || zero_rate_release) {
+      // No yaw-angle memory: when yaw rate disappears, differential torque disappears immediately.
+      yaw_differential_command_nm_ = 0.0;
+    } else {
+      const double max_yaw_step = yaw_differential_slew_rate_nm_s_ * actual_dt;
+      yaw_differential_command_nm_ += clamp_value(
+        yaw_target - yaw_differential_command_nm_, -max_yaw_step, max_yaw_step);
+      yaw_differential_command_nm_ = clamp_value(
+        yaw_differential_command_nm_, -yaw_allowed, yaw_allowed);
+    }
+
+    const bool yaw_limited =
+      std::abs(yaw_differential_raw - yaw_differential_command_nm_) > 1.0e-9;
+
+    debug.yaw_enabled_flag = yaw_enable_ ? 1.0 : 0.0;
+    debug.yaw_rate_raw = yaw_rate_raw;
+    debug.yaw_rate_filtered = yaw_rate_filtered;
+    debug.yaw_rate_for_control = yaw_rate_for_control;
+    debug.yaw_rate_error = yaw_rate_error;
+    debug.yaw_acceleration_filtered = yaw_acceleration_filtered;
+    debug.yaw_differential_raw = yaw_differential_raw;
+    debug.yaw_differential_command = yaw_differential_command_nm_;
+    debug.yaw_available_headroom = yaw_available_headroom;
+    debug.yaw_limited_flag = yaw_limited ? 1.0 : 0.0;
+    return yaw_differential_command_nm_;
+  }
+
   void control_step()
   {
     const auto steady_now = std::chrono::steady_clock::now();
@@ -1118,8 +1276,14 @@ private:
       return;
     }
     const double pitch_rate_raw = imu_rate_sign_ * imu_.gyro_x;
+    const double yaw_rate_raw = yaw_imu_rate_sign_ * imu_.gyro_z;
     if (!std::isfinite(pitch_rate_raw)) {
       disarm("invalid IMU pitch rate", true);
+      publish_debug(debug);
+      return;
+    }
+    if (!std::isfinite(yaw_rate_raw)) {
+      disarm("invalid IMU yaw rate", true);
       publish_debug(debug);
       return;
     }
@@ -1190,8 +1354,24 @@ private:
     const bool saturated =
       std::abs(signed_total_torque - total_torque_after_limit) > 1.0e-9;
     const double per_wheel_common_torque = 0.5 * total_torque_after_limit;
-    const double left_command = left_motor_sign_ * per_wheel_common_torque;
-    const double right_command = right_motor_sign_ * per_wheel_common_torque;
+    const double yaw_differential_torque = calculate_yaw_differential_torque(
+      yaw_rate_raw, per_wheel_common_torque, actual_dt, debug);
+
+    // Positive yaw differential means left physical wheel torque increases and
+    // right physical wheel torque decreases. Motor installation signs are applied last.
+    const double left_physical_torque = clamp_value(
+      per_wheel_common_torque + yaw_differential_torque,
+      -per_wheel_torque_limit_, per_wheel_torque_limit_);
+    const double right_physical_torque = clamp_value(
+      per_wheel_common_torque - yaw_differential_torque,
+      -per_wheel_torque_limit_, per_wheel_torque_limit_);
+    const double left_command = left_motor_sign_ * left_physical_torque;
+    const double right_command = right_motor_sign_ * right_physical_torque;
+
+    debug.left_physical_torque = left_physical_torque;
+    debug.right_physical_torque = right_physical_torque;
+    debug.left_motor_command = left_command;
+    debug.right_motor_command = right_command;
 
     if (dry_run_) {
       publish_motor_commands(false, 0.0, 0.0);
@@ -1225,19 +1405,24 @@ private:
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 100,
         "pitch=%+.2fdeg rate=%+.3f x=%+.4f ex=%+.4f v=%+.4f vf=%+.4f "
-        "pitch_sp=%+.2fdeg uT=%+.4f perWheel=%+.4f sat=%d outer_sat=%d",
+        "pitch_sp=%+.2fdeg uT=%+.4f common=%+.4f yawRate=%+.3f yawDiff=%+.4f "
+        "Lphys=%+.4f Rphys=%+.4f sat=%d outer_sat=%d yaw_lim=%d",
         pitch * 180.0 / kPi, pitch_rate, position_m, position_error,
         velocity_mps, debug.outer_velocity_filtered,
         debug.pitch_setpoint_command * 180.0 / kPi,
-        u_total_unsaturated, per_wheel_common_torque, saturated ? 1 : 0,
-        debug.outer_saturation_flag > 0.5 ? 1 : 0);
+        u_total_unsaturated, per_wheel_common_torque, debug.yaw_rate_filtered,
+        debug.yaw_differential_command, debug.left_physical_torque,
+        debug.right_physical_torque, saturated ? 1 : 0,
+        debug.outer_saturation_flag > 0.5 ? 1 : 0,
+        debug.yaw_limited_flag > 0.5 ? 1 : 0);
     } else {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 100,
         "pitch=%+.2fdeg rate=%+.3f x=%+.4f v=%+.4f "
-        "uT=%+.4f perWheel=%+.4f sat=%d dt=%.3fms imu=%.3fms",
+        "uT=%+.4f common=%+.4f yawRate=%+.3f yawDiff=%+.4f sat=%d dt=%.3fms imu=%.3fms",
         pitch * 180.0 / kPi, pitch_rate, position_m, velocity_mps,
-        u_total_unsaturated, per_wheel_common_torque, saturated ? 1 : 0,
+        u_total_unsaturated, per_wheel_common_torque, debug.yaw_rate_filtered,
+        debug.yaw_differential_command, saturated ? 1 : 0,
         actual_dt * 1000.0, debug.imu_age_s * 1000.0);
     }
   }
@@ -1323,7 +1508,21 @@ private:
       sample.attitude_error,                     // 47
       sample.outer_saturation_flag,              // 48
       cascade_pitch_limit_rad_,                  // 49
-      cascade_pitch_slew_rate_rad_s_             // 50
+      cascade_pitch_slew_rate_rad_s_,            // 50
+      sample.yaw_enabled_flag,                   // 51
+      sample.yaw_rate_raw,                       // 52
+      sample.yaw_rate_filtered,                  // 53
+      sample.yaw_rate_for_control,               // 54
+      sample.yaw_rate_error,                     // 55
+      sample.yaw_acceleration_filtered,          // 56
+      sample.yaw_differential_raw,               // 57
+      sample.yaw_differential_command,           // 58
+      sample.yaw_available_headroom,              // 59
+      sample.yaw_limited_flag,                   // 60
+      sample.left_physical_torque,                // 61
+      sample.right_physical_torque,               // 62
+      sample.left_motor_command,                  // 63
+      sample.right_motor_command                  // 64
     };
     debug_pub_->publish(message);
   }
@@ -1439,6 +1638,17 @@ private:
   double pitch_position_compensation_sign_{1.0};
   double pitch_rate_compensation_sign_{1.0};
 
+  bool yaw_enable_{true};
+  double yaw_imu_rate_sign_{1.0};
+  double yaw_output_sign_{1.0};
+  double yaw_rate_kp_per_wheel_nm_per_rad_s_{0.015};
+  double yaw_rate_kd_per_wheel_nm_per_rad_s2_{0.0};
+  double yaw_rate_deadband_rad_s_{0.02};
+  double yaw_rate_filter_hz_{15.0};
+  double yaw_acceleration_filter_hz_{8.0};
+  double yaw_differential_torque_limit_nm_{0.025};
+  double yaw_differential_slew_rate_nm_s_{0.50};
+
   double wheel_radius_m_{0.030};
   double body_mass_kg_{2.54};
   double non_pitch_mass_kg_{0.26};
@@ -1498,6 +1708,8 @@ private:
   FirstOrderLowPass pitch_rate_filter_;
   FirstOrderLowPass wheel_velocity_filter_;
   FirstOrderLowPass outer_velocity_filter_;
+  FirstOrderLowPass yaw_rate_filter_;
+  FirstOrderLowPass yaw_acceleration_filter_;
 
   double target_position_m_{0.0};
   double target_velocity_mps_{0.0};
@@ -1508,6 +1720,10 @@ private:
 
   double cascade_pitch_setpoint_rad_{0.0};
   double cascade_position_integral_m_s_{0.0};
+
+  bool yaw_rate_initialized_{false};
+  double last_yaw_rate_filtered_rad_s_{0.0};
+  double yaw_differential_command_nm_{0.0};
 };
 
 int main(int argc, char ** argv)

@@ -15,7 +15,7 @@ micro_lqr_controller:
 
     # New yaw differential direction is hardware-dependent.
     # Keep true for the first yaw sign/noise test, then change to false.
-    dry_run: false
+    dry_run: true
     torque_limit: 0.12
     hard_torque_limit: 0.45
     lqr_gain_scale: 0.4
@@ -53,7 +53,7 @@ micro_lqr_controller:
     #   yaw differential = output_sign * (Kp*error - Kd*yaw_acceleration)
     # Positive differential adds physical forward torque to the left wheel and
     # subtracts the same amount from the right wheel.
-    yaw.enable: true
+    yaw.enable: false
 
     # HIPNUC/EcatV2 publishes angular_velocity.z in rad/s without axis remapping.
     # Flip only if your IMU installation makes the measured sign inconvenient.
@@ -65,7 +65,7 @@ micro_lqr_controller:
 
     # Per-wheel differential torque coefficients.
     # Start conservatively. Kd is optional and disabled by default.
-    yaw.rate_kp_per_wheel_nm_per_rad_s: 0.033
+    yaw.rate_kp_per_wheel_nm_per_rad_s: 0.015
     yaw.rate_kd_per_wheel_nm_per_rad_s2: 0.0
 
     # Continuous deadband: output is exactly zero inside this yaw-rate band.
@@ -106,8 +106,8 @@ micro_lqr_controller:
 
     # ---------------- Existing cascade controller ----------------
     # Values below preserve the current repository effect.
-    cascade.attitude_k_pitch: 0.72
-    cascade.attitude_k_pitch_rate: 0.05
+    cascade.attitude_k_pitch: 0.70
+    cascade.attitude_k_pitch_rate: 0.04
     cascade.position_kp_rad_per_m: 0.22
     cascade.velocity_kd_rad_per_mps: 0.16
     cascade.position_ki_rad_per_m_s: 0.0

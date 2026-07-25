@@ -31,3 +31,9 @@ ros2 param get /micro_lqr_controller output_gain_sign || true
 ros2 param get /micro_lqr_controller torque_limit || true
 ros2 param get /micro_lqr_controller cascade.pitch_limit_deg || true
 ros2 param get /micro_lqr_controller cascade.outer_velocity_filter_hz || true
+ros2 param get /micro_lqr_controller yaw.enable || true
+ros2 param get /micro_lqr_controller yaw.imu_rate_sign || true
+ros2 param get /micro_lqr_controller yaw.output_sign || true
+ros2 param get /micro_lqr_controller yaw.rate_kp_per_wheel_nm_per_rad_s || true
+ros2 param get /micro_lqr_controller yaw.differential_torque_limit_nm || true
+

@@ -55,3 +55,18 @@ Type: `std_msgs/msg/Float64MultiArray`
 49 cascade_pitch_limit_rad
 50 cascade_pitch_slew_rate_rad_s
 ```
+51 yaw_enabled_flag
+52 yaw_rate_raw (rad/s, after yaw.imu_rate_sign)
+53 yaw_rate_filtered (rad/s)
+54 yaw_rate_for_control (rad/s, after continuous deadband)
+55 yaw_rate_error (rad/s, always 0 - measured rate)
+56 yaw_acceleration_filtered (rad/s^2)
+57 yaw_differential_raw (N*m per wheel)
+58 yaw_differential_command (N*m per wheel)
+59 yaw_available_headroom (N*m per wheel)
+60 yaw_limited_flag
+61 left_physical_torque (N*m, before motor installation sign)
+62 right_physical_torque (N*m, before motor installation sign)
+63 left_motor_command (N*m, after installation sign)
+64 right_motor_command (N*m, after installation sign)
+
