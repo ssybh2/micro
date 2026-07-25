@@ -84,13 +84,13 @@ micro_lqr_controller:
     # Inner attitude loop. Units are TOTAL axle torque coefficients.
     # These preserve the effective attitude gains already shown to avoid
     # the previous high-frequency pitch-rate oscillation.
-    cascade.attitude_k_pitch: 0.80                  # N*m/rad
+    cascade.attitude_k_pitch: 0.70                  # N*m/rad
     cascade.attitude_k_pitch_rate: 0.04             # N*m/(rad/s)
 
     # Outer position loop outputs pitch setpoint, NOT torque.
     # Initial values intentionally command a slow return.
-    cascade.position_kp_rad_per_m: 0.05             # rad/m
-    cascade.velocity_kd_rad_per_mps: 0.05           # rad/(m/s)
+    cascade.position_kp_rad_per_m: 0.22             # rad/m
+    cascade.velocity_kd_rad_per_mps: 0.16           # rad/(m/s)
     cascade.position_ki_rad_per_m_s: 0.0
     cascade.enable_integral: false
     cascade.integral_limit_m_s: 0.20
@@ -100,8 +100,8 @@ micro_lqr_controller:
 
     # Structural decoupling: position control can request at most +/-2 degrees,
     # and its request can move at only 5 deg/s.
-    cascade.pitch_limit_deg: 2.0
-    cascade.pitch_slew_rate_deg_s: 5.0
+    cascade.pitch_limit_deg: 5.0
+    cascade.pitch_slew_rate_deg_s: 50.0
 
     # Prevent very large displacement or speed estimates from producing an
     # arbitrarily large outer-loop request before pitch limiting.
