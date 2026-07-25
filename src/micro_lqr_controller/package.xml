@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>micro_lqr_controller</name>
-  <version>2.0.0</version>
-  <description>Discrete LQR controller with online model construction and DARE solution for a fixed-leg two-wheel robot.</description>
+  <version>2.1.0</version>
+  <description>Discrete LQR controller with live closed-loop pole and unit-circle visualization for a fixed-leg two-wheel robot.</description>
   <maintainer email="uonaim@example.com">uonaim</maintainer>
   <license>MIT</license>
 
@@ -14,6 +14,10 @@
   <depend>std_msgs</depend>
   <depend>custom_msgs</depend>
   <depend>eigen</depend>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

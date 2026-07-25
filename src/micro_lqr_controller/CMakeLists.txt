@@ -25,8 +25,19 @@ ament_target_dependencies(
 )
 target_link_libraries(micro_lqr_node Eigen3::Eigen)
 
+add_executable(micro_lqr_pole_monitor src/micro_lqr_pole_monitor.cpp)
+target_compile_features(micro_lqr_pole_monitor PUBLIC cxx_std_17)
+ament_target_dependencies(
+  micro_lqr_pole_monitor
+  rclcpp
+  rcl_interfaces
+  std_msgs
+)
+target_link_libraries(micro_lqr_pole_monitor Eigen3::Eigen)
+
 install(TARGETS
   micro_lqr_node
+  micro_lqr_pole_monitor
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -40,6 +51,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/check_topics.sh
+  scripts/pole_visualizer.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
