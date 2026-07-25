@@ -80,10 +80,10 @@ micro_lqr_controller:
 
     # Normally leave false. This exists only for controlled comparison.
     lqr.use_manual_gain: true
-    lqr.manual_k_pitch: -2.9
-    lqr.manual_k_pitch_rate: -0.15
-    lqr.manual_k_position: -0.6
-    lqr.manual_k_velocity: -0.15
+    lqr.manual_k_pitch: -2.0
+    lqr.manual_k_pitch_rate: -0.10
+    lqr.manual_k_position: -1.0
+    lqr.manual_k_velocity: -0.13
 
     motor_position_wrap_half_range: 3.141592653589793
     pitch_filter_hz: 40.0
