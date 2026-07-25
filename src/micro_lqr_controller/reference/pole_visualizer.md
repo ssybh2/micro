@@ -1,72 +1,25 @@
-# Live closed-loop pole visualizer
+# Live local pole visualizer
 
-## What it shows
-
-The monitor reads the parameters of the running `/micro_lqr_controller` node, rebuilds the same continuous model, exact-ZOH discrete model, and DARE solution used by `micro_lqr_node.cpp`, then evaluates the active feedback law
+The controller supports two architectures:
 
 ```text
-u = -lqr_gain_scale * K * state_error
+control_mode="lqr"      direct four-state feedback
+control_mode="cascade"  position-to-pitch outer loop plus attitude inner loop
 ```
 
-with
+In `cascade` mode, the monitor publishes the local, unsaturated equivalent feedback gain:
 
 ```text
-state_error = [pitch, pitch_rate, position_error, velocity_error]
+u = -K_equivalent * [pitch, pitch_rate, position_error, velocity_error]
 ```
 
-The plotted poles are the eigenvalues of
+It then plots the eigenvalues of:
 
 ```text
-Acl = Ad - Bd * (lqr_gain_scale * K)
+Acl = Ad - Bd*K_equivalent
 ```
 
-For a discrete-time nominal model, all poles must satisfy `abs(lambda) < 1`.
-
-## Install dependencies
-
-```bash
-sudo apt update
-sudo apt install -y python3-numpy python3-matplotlib
-```
-
-## Build
-
-From the ROS 2 workspace root:
-
-```bash
-colcon build --packages-select micro_lqr_controller --symlink-install
-source install/setup.bash
-```
-
-## Launch
-
-```bash
-ros2 launch micro_lqr_controller micro_lqr.launch.py
-```
-
-The controller, pole monitor, and plot window start together.
-
-Disable only the GUI while keeping the pole topic:
-
-```bash
-ros2 launch micro_lqr_controller micro_lqr.launch.py show_poles:=false
-```
-
-Change the monitor refresh period:
-
-```bash
-ros2 launch micro_lqr_controller micro_lqr.launch.py pole_monitor_period_s:=0.2
-```
-
-## Runtime tuning behavior
-
-The current controller permits `lqr_gain_scale` to change at runtime, so this command updates the plot without restarting:
-
-```bash
-ros2 param set /micro_lqr_controller lqr_gain_scale 0.6
-```
-
-The current controller intentionally rejects runtime changes to `model.*` and `lqr.*` parameters, including manual K. Edit `config/lqr.yaml`, rebuild if necessary, and relaunch to visualize a new manual K.
+The monitor deliberately does not model the pitch-setpoint clamp, pitch-setpoint slew limiter, outer velocity low-pass, integral state, torque saturation, delays, friction or noise. Therefore the plot is a local screening tool, not a complete robust-stability certificate.
 
 ## Message schema
 
@@ -77,15 +30,18 @@ Type: `std_msgs/msg/Float64MultiArray`
 ```text
 0    schema version (=1)
 1    stable flag
-2    spectral radius max(abs(lambda))
-3    radial margin 1 - spectral radius
-4    lqr_gain_scale
-5    sample time [s]
-6    manual-gain flag
-7:10 active K = [K_pitch, K_pitch_rate, K_position, K_velocity]
-11:30 four poles; each pole stores [real, imag, magnitude, damping ratio, damped frequency Hz]
+2    local spectral radius
+3    local radial margin 1-rho
+4    published gain scale
+5    sample time
+6    manual/equivalent gain flag
+7:10 active or equivalent K
+11:30 four poles, each [real, imag, magnitude, damping ratio, frequency Hz]
+31   cascade mode flag (optional extension)
+32   pitch-setpoint limit [deg]
+33   pitch-setpoint slew limit [deg/s]
 ```
 
-## Interpretation limits
+## Interpretation
 
-The unit-circle test is a nominal, unsaturated, linear-model test. It does not include motor delay, sensor filtering delay, static friction, tire slip, torque saturation, inaccurate mass/inertia/COM values, or an incorrect hardware sign mapping. A pole just inside the unit circle, such as `abs(lambda)=0.9996`, has very little practical margin.
+All local poles must remain inside the unit circle. In cascade mode, do not tune only to force the display into the green band. A slightly slower local position mode with a hard ±2° pitch request and a 5°/s pitch-setpoint slew is generally more useful on this robot than an aggressive raw velocity gain that produces a lower nominal rho but causes real high-frequency chatter.

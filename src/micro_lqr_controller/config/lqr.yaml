@@ -1,6 +1,6 @@
 micro_lqr_controller:
   ros__parameters:
-    # EcatV2_Master topics for sn2031674
+    # ---------------- ROS / EtherCAT topics ----------------
     imu_topic: "/ecat/sn2031674/app1/read"
     rc_topic: "/ecat/sn2031674/app2/read"
     left_motor_read_topic: "/ecat/sn2031674/app3/read"
@@ -9,19 +9,26 @@ micro_lqr_controller:
     right_motor_write_topic: "/ecat/sn2031674/app4/write"
     debug_topic: "/micro_lqr/debug"
 
-    # 333.333 Hz digital controller
+    # New default architecture:
+    #   position/velocity outer loop -> limited pitch setpoint
+    #   pitch/pitch-rate inner loop  -> total axle torque
+    # Set to "lqr" only when intentionally testing the old direct four-state law.
+    control_mode: "cascade"
+
+    # 333.333 Hz
     control_period_s: 0.003
 
-    # First test MUST use dry_run=true. After sign checks, set false.
+    # FIRST RUN MUST remain true. Change to false only after topic/sign checks.
     dry_run: false
-    # Per-wheel MIT torque limit. The LQR model input is total axle torque,
-    # therefore total model torque is limited to 2*torque_limit.
-    torque_limit: 0.12
-    hard_torque_limit: 0.45
+    torque_limit: 0.12          # per-wheel software limit [N*m]
+    hard_torque_limit: 0.45     # final message clamp [N*m]
+
+    # Used only in control_mode="lqr". Cascade gains below are already effective.
     lqr_gain_scale: 0.4
 
-    arm_max_tilt_deg: 20.0
-    arm_max_pitch_rate_rad_s: 0.20
+    # Safer arming window than the old 20-degree value.
+    arm_max_tilt_deg: 10.0
+    arm_max_pitch_rate_rad_s: 0.30
     fall_cutoff_deg: 25.0
     imu_timeout_s: 0.05
     motor_timeout_s: 0.05
@@ -36,9 +43,8 @@ micro_lqr_controller:
     max_target_velocity: 0.30
     rc_deadband: 0.08
 
-    # Hardware coordinate mapping. Do not repair a sign error by changing
-    # individual LQR gains. First make all measured states physically positive,
-    # then flip only output_gain_sign if positive model torque drives x_dot negative.
+    # ---------------- Hardware signs ----------------
+    # These preserve the signs in the current repository.
     output_gain_sign: -1.0
     left_motor_sign: -1.0
     right_motor_sign: 1.0
@@ -49,47 +55,69 @@ micro_lqr_controller:
     pitch_position_compensation_sign: 1.0
     pitch_rate_compensation_sign: 1.0
 
-    # Linearized inverted-pendulum/cart model.
-    # State order: [pitch, pitch_rate, x, x_dot]
-    # Input: TOTAL axle torque = left forward torque + right forward torque.
-    # Defaults use your previously stated 2.8 kg total mass, 0.13 kg per wheel,
-    # 30 mm wheel radius and approximately 120 mm COM height.
+    # ---------------- Nominal model ----------------
     model.body_mass_kg: 1.0
     model.non_pitch_mass_kg: 0.09
     model.wheel_inertia_each_kg_m2: 2.8551e-5
     model.com_height_m: 0.095
-    # Replace this with Inventor inertia about body COM around pitch axis.
-    # Current value follows the course approximation I=m*h^2.
     model.body_pitch_inertia_kg_m2: 0.0057245
     model.wheel_radius_m: 0.030
     model.gravity_mps2: 9.80665
-    # false uses the standard cart-pole x-acceleration input coefficient.
-    # true reproduces the exact B(4) expression in the uploaded course file.
     model.use_course_legacy_b4: false
 
-    # Discrete LQR cost: sum(x'Qx + u'Ru), u is total axle torque.
-    # Runtime computes Ad/Bd by exact ZOH and solves the DARE at startup.
+    # ---------------- Old direct LQR fallback ----------------
+    # These remain available only when control_mode="lqr".
     lqr.q_pitch: 1.0
     lqr.q_pitch_rate: 0.001
     lqr.q_position: 0.7
     lqr.q_velocity: 0.35
-    # R=10 is intentionally more conservative than the course R=1.
     lqr.r_total_torque: 20.0
     lqr.dare_max_iterations: 20000
     lqr.dare_tolerance: 1.0e-12
-
-    # Normally leave false. This exists only for controlled comparison.
     lqr.use_manual_gain: true
     lqr.manual_k_pitch: -2.0
     lqr.manual_k_pitch_rate: -0.10
-    lqr.manual_k_position: -1.0
+    lqr.manual_k_position: -0.55
     lqr.manual_k_velocity: -0.13
 
+    # ---------------- New cascade controller ----------------
+    # Inner attitude loop. Units are TOTAL axle torque coefficients.
+    # These preserve the effective attitude gains already shown to avoid
+    # the previous high-frequency pitch-rate oscillation.
+    cascade.attitude_k_pitch: 0.80                  # N*m/rad
+    cascade.attitude_k_pitch_rate: 0.04             # N*m/(rad/s)
+
+    # Outer position loop outputs pitch setpoint, NOT torque.
+    # Initial values intentionally command a slow return.
+    cascade.position_kp_rad_per_m: 0.05             # rad/m
+    cascade.velocity_kd_rad_per_mps: 0.05           # rad/(m/s)
+    cascade.position_ki_rad_per_m_s: 0.0
+    cascade.enable_integral: false
+    cascade.integral_limit_m_s: 0.20
+
+    # For current coordinate signs, positive position error requests negative pitch.
+    cascade.position_to_pitch_sign: -1.0
+
+    # Structural decoupling: position control can request at most +/-2 degrees,
+    # and its request can move at only 5 deg/s.
+    cascade.pitch_limit_deg: 2.0
+    cascade.pitch_slew_rate_deg_s: 5.0
+
+    # Prevent very large displacement or speed estimates from producing an
+    # arbitrarily large outer-loop request before pitch limiting.
+    cascade.position_error_limit_m: 0.50
+    cascade.velocity_error_limit_mps: 0.80
+
+    # Critical for your logs: velocity is used for slow damping only after a
+    # separate 5-Hz low-pass, so motor-speed jitter is not injected directly.
+    cascade.outer_velocity_filter_hz: 5.0
+
+    # ---------------- State estimation filters ----------------
     motor_position_wrap_half_range: 3.141592653589793
     pitch_filter_hz: 40.0
     pitch_rate_filter_hz: 25.0
     wheel_velocity_filter_hz: 30.0
-    # 1.0 = motor velocity state; 0.0 = position finite difference.
+    # 1.0 = motor speed; 0.0 = finite-difference position speed.
     velocity_blend: 1.0
     velocity_mismatch_warn_mps: 0.50
     auto_calibrate_on_first_valid_data: false

@@ -33,9 +33,8 @@ using Vector4 = Eigen::Matrix<double, 4, 1>;
 using RowVector4 = Eigen::Matrix<double, 1, 4>;
 using Vector1 = Eigen::Matrix<double, 1, 1>;
 
-// Runtime state order is intentionally identical to the course model:
-//   [pitch, pitch_rate, position, velocity]
-// The model input is TOTAL axle torque (left + right forward wheel torque).
+// Plant state order: [pitch, pitch_rate, position, velocity].
+// Positive model input is TOTAL axle torque.
 
 double clamp_value(const double value, const double lower, const double upper)
 {
@@ -78,7 +77,6 @@ double quaternion_dot(const Quaternion & a, const Quaternion & b)
 
 Quaternion relative_quaternion(const Quaternion & reference, Quaternion current)
 {
-  // q and -q describe the same attitude. Keep the shortest representation.
   if (quaternion_dot(reference, current) < 0.0) {
     current.w = -current.w;
     current.x = -current.x;
@@ -87,7 +85,6 @@ Quaternion relative_quaternion(const Quaternion & reference, Quaternion current)
   }
 
   Quaternion result;
-  // conjugate(reference) * current
   result.w =
     reference.w * current.w + reference.x * current.x +
     reference.y * current.y + reference.z * current.z;
@@ -251,6 +248,21 @@ struct LqrDesignResult
   int dare_iterations{0};
 };
 
+double max_closed_loop_pole_abs(
+  const Matrix4 & a_discrete,
+  const Vector4 & b_discrete,
+  const RowVector4 & k,
+  const double gain_scale)
+{
+  const Matrix4 a_closed_loop = a_discrete - b_discrete * (gain_scale * k);
+  const Eigen::EigenSolver<Matrix4> eigen_solver(a_closed_loop, false);
+  double max_abs = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    max_abs = std::max(max_abs, std::abs(eigen_solver.eigenvalues()(i)));
+  }
+  return max_abs;
+}
+
 LqrDesignResult design_discrete_lqr(
   const double body_mass,
   const double non_pitch_mass,
@@ -279,36 +291,42 @@ LqrDesignResult design_discrete_lqr(
     }
   }
 
-  // Equivalent translation mass includes both wheel rotational inertias.
   const double m = body_mass;
-  const double m_cart = non_pitch_mass + 2.0 * wheel_inertia_each / (wheel_radius * wheel_radius);
+  const double m_cart =
+    non_pitch_mass + 2.0 * wheel_inertia_each / (wheel_radius * wheel_radius);
   const double h = com_height;
   const double i_body = body_pitch_inertia;
-  const double d = (m_cart + m) * (m * h * h + i_body) - m * m * h * h;
-  if (!std::isfinite(d) || d <= 1.0e-12) {
+  const double denominator =
+    (m_cart + m) * (m * h * h + i_body) - m * m * h * h;
+  if (!std::isfinite(denominator) || denominator <= 1.0e-12) {
     throw std::runtime_error("model denominator D is non-positive; check mass, h and inertia");
   }
 
   LqrDesignResult result;
   result.a_continuous <<
     0.0, 1.0, 0.0, 0.0,
-    ((m_cart + m) * m * gravity * h) / d, 0.0, 0.0, 0.0,
+    ((m_cart + m) * m * gravity * h) / denominator, 0.0, 0.0, 0.0,
     0.0, 0.0, 0.0, 1.0,
-    -(m * m * gravity * h * h) / d, 0.0, 0.0, 0.0;
+    -(m * m * gravity * h * h) / denominator, 0.0, 0.0, 0.0;
 
-  double b4 = (m * h * h + i_body) / (d * wheel_radius);
+  double b4 = (m * h * h + i_body) / (denominator * wheel_radius);
   if (use_course_legacy_b4) {
-    // Reproduces the exact fourth B entry in the supplied course wheel_control.m.
     b4 =
       1.0 / ((m_cart + m) * wheel_radius) -
-      (m * m * h * h) / ((m_cart + m) * d * wheel_radius);
+      (m * m * h * h) /
+      ((m_cart + m) * denominator * wheel_radius);
   }
-  result.b_continuous << 0.0, -(m * h) / (d * wheel_radius), 0.0, b4;
+  result.b_continuous <<
+    0.0,
+    -(m * h) / (denominator * wheel_radius),
+    0.0,
+    b4;
 
   Eigen::Matrix<double, 5, 5> augmented = Eigen::Matrix<double, 5, 5>::Zero();
   augmented.block<4, 4>(0, 0) = result.a_continuous;
   augmented.block<4, 1>(0, 4) = result.b_continuous;
-  const Eigen::Matrix<double, 5, 5> exp_augmented = (augmented * sample_time).exp();
+  const Eigen::Matrix<double, 5, 5> exp_augmented =
+    (augmented * sample_time).exp();
   result.a_discrete = exp_augmented.block<4, 4>(0, 0);
   result.b_discrete = exp_augmented.block<4, 1>(0, 4);
 
@@ -332,7 +350,8 @@ LqrDesignResult design_discrete_lqr(
     if (!std::isfinite(s(0, 0)) || std::abs(s(0, 0)) < 1.0e-15) {
       throw std::runtime_error("DARE scalar denominator became invalid");
     }
-    const RowVector4 k = s.inverse() * result.b_discrete.transpose() * p * result.a_discrete;
+    const RowVector4 k =
+      s.inverse() * result.b_discrete.transpose() * p * result.a_discrete;
     const Matrix4 p_next =
       result.a_discrete.transpose() * p * result.a_discrete -
       result.a_discrete.transpose() * p * result.b_discrete * k + q;
@@ -350,15 +369,8 @@ LqrDesignResult design_discrete_lqr(
 
   const Vector1 s = r + result.b_discrete.transpose() * p * result.b_discrete;
   result.k = s.inverse() * result.b_discrete.transpose() * p * result.a_discrete;
-
-  const Matrix4 a_closed_loop = result.a_discrete - result.b_discrete * result.k;
-  const Eigen::EigenSolver<Matrix4> eigen_solver(a_closed_loop, false);
-  result.max_closed_loop_pole_abs = 0.0;
-  for (int i = 0; i < 4; ++i) {
-    result.max_closed_loop_pole_abs = std::max(
-      result.max_closed_loop_pole_abs,
-      std::abs(eigen_solver.eigenvalues()(i)));
-  }
+  result.max_closed_loop_pole_abs =
+    max_closed_loop_pole_abs(result.a_discrete, result.b_discrete, result.k, 1.0);
   if (!std::isfinite(result.max_closed_loop_pole_abs) ||
       result.max_closed_loop_pole_abs >= 1.0)
   {
@@ -375,7 +387,7 @@ struct DebugSample
   double pitch_rate{0.0};
   double target_position{0.0};
   double target_velocity{0.0};
-  double lqr_total_unsaturated{0.0};
+  double model_total_unsaturated{0.0};
   double per_wheel_common_torque{0.0};
   double pitch_raw{0.0};
   double pitch_rate_raw{0.0};
@@ -398,6 +410,16 @@ struct DebugSample
   double velocity_error{0.0};
   double velocity_motor_based{0.0};
   double velocity_mismatch{0.0};
+
+  // Cascade-specific extension, appended after the legacy schema.
+  double cascade_mode_flag{0.0};
+  double pitch_setpoint_raw{0.0};
+  double pitch_setpoint_limited{0.0};
+  double pitch_setpoint_command{0.0};
+  double outer_velocity_filtered{0.0};
+  double position_integral{0.0};
+  double attitude_error{0.0};
+  double outer_saturation_flag{0.0};
 };
 
 }  // namespace
@@ -410,7 +432,7 @@ public:
   {
     declare_and_load_parameters();
     configure_filters();
-    design_controller();
+    design_controller_and_check_local_stability();
 
     const auto qos =
       rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
@@ -472,8 +494,8 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "standard discrete LQR started at %.3f Hz; dry_run=%s; state=[pitch,pitch_rate,x,x_dot]",
-      1.0 / control_period_s_, dry_run_ ? "true" : "false");
+      "controller started at %.3f Hz; mode=%s; dry_run=%s; state=[pitch,pitch_rate,x,x_dot]",
+      1.0 / control_period_s_, control_mode_.c_str(), dry_run_ ? "true" : "false");
     RCLCPP_INFO(
       get_logger(), "RC right switch: calibrate=%d, arm=%d, disable=%d",
       calibrate_switch_value_, arm_switch_value_, disable_switch_value_);
@@ -485,6 +507,11 @@ public:
   }
 
 private:
+  bool cascade_mode() const
+  {
+    return control_mode_ == "cascade";
+  }
+
   void declare_and_load_parameters()
   {
     imu_topic_ = declare_parameter<std::string>(
@@ -501,6 +528,7 @@ private:
       "right_motor_write_topic", "/ecat/sn2031674/app4/write");
     debug_topic_ = declare_parameter<std::string>("debug_topic", "/micro_lqr/debug");
 
+    control_mode_ = declare_parameter<std::string>("control_mode", "cascade");
     control_period_s_ = declare_parameter<double>("control_period_s", 0.003);
     dry_run_ = declare_parameter<bool>("dry_run", true);
     per_wheel_torque_limit_ = declare_parameter<double>("torque_limit", 0.05);
@@ -508,9 +536,9 @@ private:
     lqr_gain_scale_ = declare_parameter<double>("lqr_gain_scale", 1.0);
 
     arm_max_tilt_rad_ =
-      declare_parameter<double>("arm_max_tilt_deg", 2.0) * kPi / 180.0;
+      declare_parameter<double>("arm_max_tilt_deg", 3.0) * kPi / 180.0;
     arm_max_pitch_rate_rad_s_ =
-      declare_parameter<double>("arm_max_pitch_rate_rad_s", 0.20);
+      declare_parameter<double>("arm_max_pitch_rate_rad_s", 0.30);
     fall_cutoff_rad_ =
       declare_parameter<double>("fall_cutoff_deg", 25.0) * kPi / 180.0;
     imu_timeout_s_ = declare_parameter<double>("imu_timeout_s", 0.05);
@@ -571,6 +599,34 @@ private:
     manual_k_position_ = declare_parameter<double>("lqr.manual_k_position", 0.0);
     manual_k_velocity_ = declare_parameter<double>("lqr.manual_k_velocity", 0.0);
 
+    cascade_attitude_k_pitch_ =
+      declare_parameter<double>("cascade.attitude_k_pitch", 0.80);
+    cascade_attitude_k_pitch_rate_ =
+      declare_parameter<double>("cascade.attitude_k_pitch_rate", 0.04);
+    cascade_position_kp_rad_per_m_ =
+      declare_parameter<double>("cascade.position_kp_rad_per_m", 0.05);
+    cascade_velocity_kd_rad_per_mps_ =
+      declare_parameter<double>("cascade.velocity_kd_rad_per_mps", 0.05);
+    cascade_position_ki_rad_per_m_s_ =
+      declare_parameter<double>("cascade.position_ki_rad_per_m_s", 0.0);
+    cascade_enable_integral_ =
+      declare_parameter<bool>("cascade.enable_integral", false);
+    cascade_integral_limit_m_s_ =
+      declare_parameter<double>("cascade.integral_limit_m_s", 0.20);
+    cascade_pitch_limit_rad_ =
+      declare_parameter<double>("cascade.pitch_limit_deg", 2.0) * kPi / 180.0;
+    cascade_pitch_slew_rate_rad_s_ =
+      declare_parameter<double>("cascade.pitch_slew_rate_deg_s", 5.0) * kPi / 180.0;
+    cascade_position_error_limit_m_ =
+      declare_parameter<double>("cascade.position_error_limit_m", 0.50);
+    cascade_velocity_error_limit_mps_ =
+      declare_parameter<double>("cascade.velocity_error_limit_mps", 0.80);
+    cascade_outer_velocity_filter_hz_ =
+      declare_parameter<double>("cascade.outer_velocity_filter_hz", 5.0);
+    cascade_position_to_pitch_sign_ = sign_or_throw(
+      declare_parameter<double>("cascade.position_to_pitch_sign", -1.0),
+      "cascade.position_to_pitch_sign");
+
     motor_position_wrap_half_range_ = declare_parameter<double>(
       "motor_position_wrap_half_range", kPi);
     pitch_filter_hz_ = declare_parameter<double>("pitch_filter_hz", 40.0);
@@ -590,6 +646,9 @@ private:
 
   void validate_parameters() const
   {
+    if (control_mode_ != "cascade" && control_mode_ != "lqr") {
+      throw std::runtime_error("control_mode must be 'cascade' or 'lqr'");
+    }
     if (!std::isfinite(control_period_s_) || control_period_s_ <= 0.0) {
       throw std::runtime_error("control_period_s must be positive");
     }
@@ -615,6 +674,25 @@ private:
     if (!std::isfinite(rc_deadband_) || rc_deadband_ < 0.0 || rc_deadband_ >= 1.0) {
       throw std::runtime_error("rc_deadband must be in [0,1)");
     }
+    if (
+      !std::isfinite(cascade_attitude_k_pitch_) || cascade_attitude_k_pitch_ <= 0.0 ||
+      !std::isfinite(cascade_attitude_k_pitch_rate_) || cascade_attitude_k_pitch_rate_ < 0.0 ||
+      !std::isfinite(cascade_position_kp_rad_per_m_) || cascade_position_kp_rad_per_m_ < 0.0 ||
+      !std::isfinite(cascade_velocity_kd_rad_per_mps_) || cascade_velocity_kd_rad_per_mps_ < 0.0 ||
+      !std::isfinite(cascade_position_ki_rad_per_m_s_) || cascade_position_ki_rad_per_m_s_ < 0.0)
+    {
+      throw std::runtime_error("cascade gains must be finite; Kp values positive and Kd/Ki non-negative");
+    }
+    if (
+      !std::isfinite(cascade_pitch_limit_rad_) || cascade_pitch_limit_rad_ <= 0.0 ||
+      !std::isfinite(cascade_pitch_slew_rate_rad_s_) || cascade_pitch_slew_rate_rad_s_ <= 0.0 ||
+      !std::isfinite(cascade_position_error_limit_m_) || cascade_position_error_limit_m_ <= 0.0 ||
+      !std::isfinite(cascade_velocity_error_limit_mps_) || cascade_velocity_error_limit_mps_ <= 0.0 ||
+      !std::isfinite(cascade_integral_limit_m_s_) || cascade_integral_limit_m_s_ < 0.0 ||
+      !std::isfinite(cascade_outer_velocity_filter_hz_) || cascade_outer_velocity_filter_hz_ < 0.0)
+    {
+      throw std::runtime_error("cascade limits/filter parameters are invalid");
+    }
   }
 
   void configure_filters()
@@ -622,9 +700,35 @@ private:
     pitch_filter_.configure(pitch_filter_hz_, control_period_s_);
     pitch_rate_filter_.configure(pitch_rate_filter_hz_, control_period_s_);
     wheel_velocity_filter_.configure(wheel_velocity_filter_hz_, control_period_s_);
+    outer_velocity_filter_.configure(cascade_outer_velocity_filter_hz_, control_period_s_);
   }
 
-  void design_controller()
+  RowVector4 cascade_equivalent_k() const
+  {
+    // Visualizer convention: u = -K*x. Runtime cascade (before nonlinear limits):
+    // u = Ka*pitch + Kd*rate - Ka*sign*(Kx*x + Kv*v).
+    RowVector4 k;
+    k <<
+      -cascade_attitude_k_pitch_,
+      -cascade_attitude_k_pitch_rate_,
+      cascade_attitude_k_pitch_ * cascade_position_to_pitch_sign_ *
+        cascade_position_kp_rad_per_m_,
+      cascade_attitude_k_pitch_ * cascade_position_to_pitch_sign_ *
+        cascade_velocity_kd_rad_per_mps_;
+    return k;
+  }
+
+  RowVector4 active_equivalent_k() const
+  {
+    return cascade_mode() ? cascade_equivalent_k() : lqr_design_.k;
+  }
+
+  double active_equivalent_gain_scale() const
+  {
+    return cascade_mode() ? 1.0 : lqr_gain_scale_;
+  }
+
+  void design_controller_and_check_local_stability()
   {
     const Vector4 q_diag(q_pitch_, q_pitch_rate_, q_position_, q_velocity_);
     lqr_design_ = design_discrete_lqr(
@@ -638,21 +742,42 @@ private:
         manual_k_pitch_, manual_k_pitch_rate_, manual_k_position_, manual_k_velocity_;
     }
 
-    RCLCPP_INFO(
-      get_logger(),
-      "LQR K=[%+.9f %+.9f %+.9f %+.9f], controllability=%d, max|pole|=%.9f, DARE=%d",
-      lqr_design_.k(0), lqr_design_.k(1), lqr_design_.k(2), lqr_design_.k(3),
-      lqr_design_.controllability_rank, lqr_design_.max_closed_loop_pole_abs,
-      lqr_design_.dare_iterations);
+    const RowVector4 active_k = active_equivalent_k();
+    const double active_scale = active_equivalent_gain_scale();
+    active_local_max_pole_abs_ = max_closed_loop_pole_abs(
+      lqr_design_.a_discrete, lqr_design_.b_discrete, active_k, active_scale);
+    if (!std::isfinite(active_local_max_pole_abs_) || active_local_max_pole_abs_ >= 1.0) {
+      throw std::runtime_error(
+              "active controller local linearization is unstable; adjust YAML before running");
+    }
+
+    if (cascade_mode()) {
+      RCLCPP_INFO(
+        get_logger(),
+        "CASCADE inner: u=%.4f*(pitch-pitch_sp)+%.4f*pitch_rate; "
+        "outer: pitch_sp=%+.0f*(%.4f*x_err+%.4f*v_err), limit=%.2fdeg, slew=%.2fdeg/s",
+        cascade_attitude_k_pitch_, cascade_attitude_k_pitch_rate_,
+        cascade_position_to_pitch_sign_, cascade_position_kp_rad_per_m_,
+        cascade_velocity_kd_rad_per_mps_, cascade_pitch_limit_rad_ * 180.0 / kPi,
+        cascade_pitch_slew_rate_rad_s_ * 180.0 / kPi);
+      RCLCPP_INFO(
+        get_logger(),
+        "cascade local equivalent K=[%+.6f %+.6f %+.6f %+.6f], max|pole|=%.9f "
+        "(limits, slew and filters are nonlinear and not included)",
+        active_k(0), active_k(1), active_k(2), active_k(3), active_local_max_pole_abs_);
+    } else {
+      lqr_design_.max_closed_loop_pole_abs = active_local_max_pole_abs_;
+      RCLCPP_INFO(
+        get_logger(),
+        "LQR K=[%+.9f %+.9f %+.9f %+.9f], scale=%.4f, controllability=%d, "
+        "max|pole|=%.9f, DARE=%d",
+        lqr_design_.k(0), lqr_design_.k(1), lqr_design_.k(2), lqr_design_.k(3),
+        lqr_gain_scale_, lqr_design_.controllability_rank,
+        lqr_design_.max_closed_loop_pole_abs, lqr_design_.dare_iterations);
+    }
     RCLCPP_INFO(
       get_logger(),
       "model input is TOTAL axle torque; each wheel receives 0.5*u_total before motor sign");
-    if (use_course_legacy_b4_) {
-      RCLCPP_WARN(get_logger(), "using exact legacy B(4) expression from supplied course MATLAB file");
-    }
-    if (use_manual_gain_) {
-      RCLCPP_WARN(get_logger(), "manual gain override enabled; online controller is fixed state feedback");
-    }
   }
 
   void copy_motor_message(
@@ -707,6 +832,17 @@ private:
     return std::isfinite(pitch);
   }
 
+  void reset_controller_states()
+  {
+    target_position_m_ = 0.0;
+    target_velocity_mps_ = 0.0;
+    last_position_m_ = 0.0;
+    position_fd_initialized_ = false;
+    control_time_initialized_ = false;
+    cascade_pitch_setpoint_rad_ = 0.0;
+    cascade_position_integral_m_s_ = 0.0;
+  }
+
   void calibrate_zero()
   {
     Quaternion current = imu_.orientation;
@@ -721,11 +857,8 @@ private:
     pitch_filter_.reset(0.0);
     pitch_rate_filter_.reset(0.0);
     wheel_velocity_filter_.reset(0.0);
-    target_position_m_ = 0.0;
-    target_velocity_mps_ = 0.0;
-    last_position_m_ = 0.0;
-    position_fd_initialized_ = false;
-    control_time_initialized_ = false;
+    outer_velocity_filter_.reset(0.0);
+    reset_controller_states();
     calibrated_ = true;
     armed_ = false;
     arm_transition_required_ = true;
@@ -735,10 +868,12 @@ private:
   void disarm(const char * reason, const bool require_switch_cycle)
   {
     if (armed_) {
-      RCLCPP_WARN(get_logger(), "LQR disarmed: %s", reason);
+      RCLCPP_WARN(get_logger(), "controller disarmed: %s", reason);
     }
     armed_ = false;
     position_fd_initialized_ = false;
+    cascade_pitch_setpoint_rad_ = 0.0;
+    cascade_position_integral_m_s_ = 0.0;
     if (require_switch_cycle) {
       arm_transition_required_ = true;
     }
@@ -789,16 +924,19 @@ private:
     pitch_filter_.reset(pitch);
     pitch_rate_filter_.reset(pitch_rate_raw);
     wheel_velocity_filter_.reset(mean_relative_rate_raw);
+    outer_velocity_filter_.reset(0.0);
     last_position_m_ = target_position_m_;
     position_fd_initialized_ = true;
     control_time_initialized_ = false;
+    cascade_pitch_setpoint_rad_ = 0.0;
+    cascade_position_integral_m_s_ = 0.0;
     armed_ = true;
     arm_transition_required_ = false;
     RCLCPP_INFO(
       get_logger(),
-      "LQR armed; target_position=%.5f m; pitch=%+.3fdeg; rate=%+.3frad/s; dry_run=%s",
-      target_position_m_, pitch * 180.0 / kPi, pitch_rate_raw,
-      dry_run_ ? "true" : "false");
+      "%s armed; target_position=%.5f m; pitch=%+.3fdeg; rate=%+.3frad/s; dry_run=%s",
+      cascade_mode() ? "CASCADE" : "LQR", target_position_m_, pitch * 180.0 / kPi,
+      pitch_rate_raw, dry_run_ ? "true" : "false");
   }
 
   double process_rc_velocity_command() const
@@ -813,6 +951,96 @@ private:
     const double scaled =
       (std::abs(command) - rc_deadband_) / std::max(1.0 - rc_deadband_, 1.0e-6);
     return std::copysign(scaled * max_target_velocity_, command);
+  }
+
+  double calculate_cascade_torque(
+    const double pitch,
+    const double pitch_rate,
+    const double position_error,
+    const double velocity_error,
+    const double actual_dt,
+    DebugSample & debug)
+  {
+    const double outer_velocity = outer_velocity_filter_.update(velocity_error, actual_dt);
+    const double limited_position_error = clamp_value(
+      position_error, -cascade_position_error_limit_m_, cascade_position_error_limit_m_);
+    const double limited_velocity_error = clamp_value(
+      outer_velocity, -cascade_velocity_error_limit_mps_, cascade_velocity_error_limit_mps_);
+
+    if (cascade_enable_integral_) {
+      cascade_position_integral_m_s_ += limited_position_error * actual_dt;
+      cascade_position_integral_m_s_ = clamp_value(
+        cascade_position_integral_m_s_,
+        -cascade_integral_limit_m_s_, cascade_integral_limit_m_s_);
+    } else {
+      cascade_position_integral_m_s_ = 0.0;
+    }
+
+    const double outer_command =
+      cascade_position_kp_rad_per_m_ * limited_position_error +
+      cascade_velocity_kd_rad_per_mps_ * limited_velocity_error +
+      cascade_position_ki_rad_per_m_s_ * cascade_position_integral_m_s_;
+    const double pitch_setpoint_raw = cascade_position_to_pitch_sign_ * outer_command;
+    const double pitch_setpoint_limited = clamp_value(
+      pitch_setpoint_raw, -cascade_pitch_limit_rad_, cascade_pitch_limit_rad_);
+    const bool outer_saturated =
+      std::abs(pitch_setpoint_raw - pitch_setpoint_limited) > 1.0e-12;
+
+    const double max_setpoint_step = cascade_pitch_slew_rate_rad_s_ * actual_dt;
+    const double setpoint_delta = clamp_value(
+      pitch_setpoint_limited - cascade_pitch_setpoint_rad_,
+      -max_setpoint_step, max_setpoint_step);
+    cascade_pitch_setpoint_rad_ += setpoint_delta;
+
+    // Prevent integral wind-up when the pitch setpoint is limited.
+    if (cascade_enable_integral_ && outer_saturated) {
+      cascade_position_integral_m_s_ -= limited_position_error * actual_dt;
+      cascade_position_integral_m_s_ = clamp_value(
+        cascade_position_integral_m_s_,
+        -cascade_integral_limit_m_s_, cascade_integral_limit_m_s_);
+    }
+
+    const double attitude_error = pitch - cascade_pitch_setpoint_rad_;
+    const double u_pitch = cascade_attitude_k_pitch_ * pitch;
+    const double u_pitch_rate = cascade_attitude_k_pitch_rate_ * pitch_rate;
+    const double u_position_equivalent =
+      -cascade_attitude_k_pitch_ * cascade_position_to_pitch_sign_ *
+      cascade_position_kp_rad_per_m_ * limited_position_error;
+    const double u_velocity_equivalent =
+      -cascade_attitude_k_pitch_ * cascade_position_to_pitch_sign_ *
+      cascade_velocity_kd_rad_per_mps_ * limited_velocity_error;
+    const double u_total =
+      cascade_attitude_k_pitch_ * attitude_error + u_pitch_rate;
+
+    debug.u_pitch = u_pitch;
+    debug.u_pitch_rate = u_pitch_rate;
+    debug.u_x = u_position_equivalent;
+    debug.u_x_dot = u_velocity_equivalent;
+    debug.pitch_setpoint_raw = pitch_setpoint_raw;
+    debug.pitch_setpoint_limited = pitch_setpoint_limited;
+    debug.pitch_setpoint_command = cascade_pitch_setpoint_rad_;
+    debug.outer_velocity_filtered = outer_velocity;
+    debug.position_integral = cascade_position_integral_m_s_;
+    debug.attitude_error = attitude_error;
+    debug.outer_saturation_flag = outer_saturated ? 1.0 : 0.0;
+    return u_total;
+  }
+
+  double calculate_lqr_torque(
+    const double pitch,
+    const double pitch_rate,
+    const double position_error,
+    const double velocity_error,
+    DebugSample & debug) const
+  {
+    Vector4 state_error;
+    state_error << pitch, pitch_rate, position_error, velocity_error;
+    const double u_total = -lqr_gain_scale_ * (lqr_design_.k * state_error)(0);
+    debug.u_pitch = -lqr_gain_scale_ * lqr_design_.k(0) * pitch;
+    debug.u_pitch_rate = -lqr_gain_scale_ * lqr_design_.k(1) * pitch_rate;
+    debug.u_x = -lqr_gain_scale_ * lqr_design_.k(2) * position_error;
+    debug.u_x_dot = -lqr_gain_scale_ * lqr_design_.k(3) * velocity_error;
+    return u_total;
   }
 
   void control_step()
@@ -834,6 +1062,7 @@ private:
     const rclcpp::Time current_time = now();
     DebugSample debug;
     debug.actual_dt = actual_dt;
+    debug.cascade_mode_flag = cascade_mode() ? 1.0 : 0.0;
 
     if (!all_input_data_valid(current_time)) {
       disarm("input timeout, RC offline, motor offline, or motor fault", true);
@@ -944,22 +1173,22 @@ private:
 
     const double position_error = position_m - target_position_m_;
     const double velocity_error = velocity_mps - target_velocity_mps_;
-    Vector4 state_error;
-    state_error << pitch, pitch_rate, position_error, velocity_error;
 
-    const double u_total_unsaturated =
-      -lqr_gain_scale_ * (lqr_design_.k * state_error)(0);
-    const double u_pitch = -lqr_gain_scale_ * lqr_design_.k(0) * pitch;
-    const double u_pitch_rate = -lqr_gain_scale_ * lqr_design_.k(1) * pitch_rate;
-    const double u_x = -lqr_gain_scale_ * lqr_design_.k(2) * position_error;
-    const double u_x_dot = -lqr_gain_scale_ * lqr_design_.k(3) * velocity_error;
+    double u_total_unsaturated = 0.0;
+    if (cascade_mode()) {
+      u_total_unsaturated = calculate_cascade_torque(
+        pitch, pitch_rate, position_error, velocity_error, actual_dt, debug);
+    } else {
+      u_total_unsaturated = calculate_lqr_torque(
+        pitch, pitch_rate, position_error, velocity_error, debug);
+    }
 
-    // K was designed for total axle torque. Two wheels share it equally.
     const double max_total_torque = 2.0 * per_wheel_torque_limit_;
+    const double signed_total_torque = output_gain_sign_ * u_total_unsaturated;
     const double total_torque_after_limit = clamp_value(
-      output_gain_sign_ * u_total_unsaturated, -max_total_torque, max_total_torque);
-    const bool saturated = std::abs(
-      output_gain_sign_ * u_total_unsaturated - total_torque_after_limit) > 1.0e-9;
+      signed_total_torque, -max_total_torque, max_total_torque);
+    const bool saturated =
+      std::abs(signed_total_torque - total_torque_after_limit) > 1.0e-9;
     const double per_wheel_common_torque = 0.5 * total_torque_after_limit;
     const double left_command = left_motor_sign_ * per_wheel_common_torque;
     const double right_command = right_motor_sign_ * per_wheel_common_torque;
@@ -974,12 +1203,8 @@ private:
     debug.velocity = velocity_mps;
     debug.target_position = target_position_m_;
     debug.target_velocity = target_velocity_mps_;
-    debug.lqr_total_unsaturated = u_total_unsaturated;
+    debug.model_total_unsaturated = u_total_unsaturated;
     debug.per_wheel_common_torque = per_wheel_common_torque;
-    debug.u_x = u_x;
-    debug.u_x_dot = u_x_dot;
-    debug.u_pitch = u_pitch;
-    debug.u_pitch_rate = u_pitch_rate;
     debug.total_torque_after_limit = total_torque_after_limit;
     debug.saturation_flag = saturated ? 1.0 : 0.0;
     debug.velocity_from_position = velocity_from_position;
@@ -996,13 +1221,25 @@ private:
         velocity_motor_based, velocity_from_position);
     }
 
-    RCLCPP_INFO_THROTTLE(
-      get_logger(), *get_clock(), 100,
-      "pitch=%+.2fdeg rate=%+.3f x=%+.4f v=%+.4f "
-      "uT=%+.4f perWheel=%+.4f sat=%d dt=%.3fms imu=%.3fms",
-      pitch * 180.0 / kPi, pitch_rate, position_m, velocity_mps,
-      u_total_unsaturated, per_wheel_common_torque, saturated ? 1 : 0,
-      actual_dt * 1000.0, debug.imu_age_s * 1000.0);
+    if (cascade_mode()) {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 100,
+        "pitch=%+.2fdeg rate=%+.3f x=%+.4f ex=%+.4f v=%+.4f vf=%+.4f "
+        "pitch_sp=%+.2fdeg uT=%+.4f perWheel=%+.4f sat=%d outer_sat=%d",
+        pitch * 180.0 / kPi, pitch_rate, position_m, position_error,
+        velocity_mps, debug.outer_velocity_filtered,
+        debug.pitch_setpoint_command * 180.0 / kPi,
+        u_total_unsaturated, per_wheel_common_torque, saturated ? 1 : 0,
+        debug.outer_saturation_flag > 0.5 ? 1 : 0);
+    } else {
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 100,
+        "pitch=%+.2fdeg rate=%+.3f x=%+.4f v=%+.4f "
+        "uT=%+.4f perWheel=%+.4f sat=%d dt=%.3fms imu=%.3fms",
+        pitch * 180.0 / kPi, pitch_rate, position_m, velocity_mps,
+        u_total_unsaturated, per_wheel_common_torque, saturated ? 1 : 0,
+        actual_dt * 1000.0, debug.imu_age_s * 1000.0);
+    }
   }
 
   void publish_motor_commands(
@@ -1033,6 +1270,7 @@ private:
 
   void publish_debug(const DebugSample & sample)
   {
+    const RowVector4 equivalent_k = active_equivalent_k();
     std_msgs::msg::Float64MultiArray message;
     message.data = {
       sample.position,                         // 0
@@ -1041,8 +1279,8 @@ private:
       sample.pitch_rate,                       // 3
       sample.target_position,                  // 4
       sample.target_velocity,                  // 5
-      sample.lqr_total_unsaturated,             // 6: model total axle torque
-      sample.per_wheel_common_torque,           // 7: after sign/limit, before motor sign
+      sample.model_total_unsaturated,           // 6
+      sample.per_wheel_common_torque,           // 7
       armed_ ? 1.0 : 0.0,                      // 8
       dry_run_ ? 1.0 : 0.0,                    // 9
       output_gain_sign_,                        // 10
@@ -1066,16 +1304,26 @@ private:
       sample.velocity_from_position,            // 28
       sample.position_error,                    // 29
       sample.velocity_error,                    // 30
-      lqr_design_.k(0),                         // 31 K_pitch
-      lqr_design_.k(1),                         // 32 K_pitch_rate
-      lqr_design_.k(2),                         // 33 K_position
-      lqr_design_.k(3),                         // 34 K_velocity
+      equivalent_k(0),                          // 31
+      equivalent_k(1),                          // 32
+      equivalent_k(2),                          // 33
+      equivalent_k(3),                          // 34
       sample.velocity_motor_based,              // 35
       sample.velocity_mismatch,                 // 36
       static_cast<double>(lqr_design_.controllability_rank),  // 37
-      lqr_design_.max_closed_loop_pole_abs,      // 38
-      lqr_gain_scale_,                           // 39
-      use_course_legacy_b4_ ? 1.0 : 0.0          // 40
+      active_local_max_pole_abs_,                // 38
+      active_equivalent_gain_scale(),            // 39
+      use_course_legacy_b4_ ? 1.0 : 0.0,         // 40
+      sample.cascade_mode_flag,                  // 41
+      sample.pitch_setpoint_raw,                 // 42
+      sample.pitch_setpoint_limited,             // 43
+      sample.pitch_setpoint_command,             // 44
+      sample.outer_velocity_filtered,            // 45
+      sample.position_integral,                  // 46
+      sample.attitude_error,                     // 47
+      sample.outer_saturation_flag,              // 48
+      cascade_pitch_limit_rad_,                  // 49
+      cascade_pitch_slew_rate_rad_s_             // 50
     };
     debug_pub_->publish(message);
   }
@@ -1090,7 +1338,6 @@ private:
     const bool old_dry_run = dry_run_;
     const double old_torque_limit = per_wheel_torque_limit_;
     const double old_output_gain_sign = output_gain_sign_;
-    const double old_gain_scale = lqr_gain_scale_;
     const bool old_enable_velocity_command = enable_velocity_command_;
     const double old_max_target_velocity = max_target_velocity_;
     bool force_disarm = false;
@@ -1107,19 +1354,13 @@ private:
         } else if (name == "output_gain_sign") {
           output_gain_sign_ = sign_or_throw(parameter.as_double(), name);
           force_disarm = true;
-        } else if (name == "lqr_gain_scale") {
-          lqr_gain_scale_ = parameter.as_double();
-          force_disarm = true;
         } else if (name == "enable_velocity_command") {
           enable_velocity_command_ = parameter.as_bool();
           force_disarm = true;
         } else if (name == "max_target_velocity") {
           max_target_velocity_ = parameter.as_double();
           force_disarm = true;
-        } else if (
-          name.rfind("model.", 0) == 0 || name.rfind("lqr.", 0) == 0 ||
-          name == "control_period_s" || name == "model.wheel_radius_m")
-        {
+        } else {
           throw std::runtime_error(name + " requires node restart and YAML edit");
         }
       }
@@ -1128,7 +1369,6 @@ private:
       dry_run_ = old_dry_run;
       per_wheel_torque_limit_ = old_torque_limit;
       output_gain_sign_ = old_output_gain_sign;
-      lqr_gain_scale_ = old_gain_scale;
       enable_velocity_command_ = old_enable_velocity_command;
       max_target_velocity_ = old_max_target_velocity;
       result.successful = false;
@@ -1139,6 +1379,8 @@ private:
     if (force_disarm) {
       armed_ = false;
       arm_transition_required_ = true;
+      cascade_pitch_setpoint_rad_ = 0.0;
+      cascade_position_integral_m_s_ = 0.0;
       publish_motor_commands(false, 0.0, 0.0);
     }
     return result;
@@ -1167,14 +1409,15 @@ private:
   std::string right_motor_read_topic_;
   std::string right_motor_write_topic_;
   std::string debug_topic_;
+  std::string control_mode_{"cascade"};
 
   double control_period_s_{0.003};
   bool dry_run_{true};
   double per_wheel_torque_limit_{0.05};
   double hard_per_wheel_torque_limit_{0.45};
   double lqr_gain_scale_{1.0};
-  double arm_max_tilt_rad_{2.0 * kPi / 180.0};
-  double arm_max_pitch_rate_rad_s_{0.20};
+  double arm_max_tilt_rad_{3.0 * kPi / 180.0};
+  double arm_max_pitch_rate_rad_s_{0.30};
   double fall_cutoff_rad_{25.0 * kPi / 180.0};
   double imu_timeout_s_{0.05};
   double motor_timeout_s_{0.05};
@@ -1218,6 +1461,21 @@ private:
   double manual_k_position_{0.0};
   double manual_k_velocity_{0.0};
   LqrDesignResult lqr_design_;
+  double active_local_max_pole_abs_{0.0};
+
+  double cascade_attitude_k_pitch_{0.80};
+  double cascade_attitude_k_pitch_rate_{0.04};
+  double cascade_position_kp_rad_per_m_{0.05};
+  double cascade_velocity_kd_rad_per_mps_{0.05};
+  double cascade_position_ki_rad_per_m_s_{0.0};
+  bool cascade_enable_integral_{false};
+  double cascade_integral_limit_m_s_{0.20};
+  double cascade_pitch_limit_rad_{2.0 * kPi / 180.0};
+  double cascade_pitch_slew_rate_rad_s_{5.0 * kPi / 180.0};
+  double cascade_position_error_limit_m_{0.50};
+  double cascade_velocity_error_limit_mps_{0.80};
+  double cascade_outer_velocity_filter_hz_{5.0};
+  double cascade_position_to_pitch_sign_{-1.0};
 
   double motor_position_wrap_half_range_{kPi};
   double pitch_filter_hz_{40.0};
@@ -1239,6 +1497,7 @@ private:
   FirstOrderLowPass pitch_filter_;
   FirstOrderLowPass pitch_rate_filter_;
   FirstOrderLowPass wheel_velocity_filter_;
+  FirstOrderLowPass outer_velocity_filter_;
 
   double target_position_m_{0.0};
   double target_velocity_mps_{0.0};
@@ -1246,6 +1505,9 @@ private:
   bool position_fd_initialized_{false};
   bool control_time_initialized_{false};
   std::chrono::steady_clock::time_point last_control_steady_time_{};
+
+  double cascade_pitch_setpoint_rad_{0.0};
+  double cascade_position_integral_m_s_{0.0};
 };
 
 int main(int argc, char ** argv)

@@ -69,6 +69,9 @@ class PoleSnapshot:
     manual_gain: bool
     gain: np.ndarray
     poles: List[Pole]
+    cascade_mode: bool = False
+    pitch_limit_deg: float = math.nan
+    pitch_slew_rate_deg_s: float = math.nan
 
 
 @dataclass(frozen=True)
@@ -409,7 +412,11 @@ class PoleDashboard:
         self._style_panel_axis(axis)
 
         status_title, status_detail, status_color = self._status(snapshot)
-        mode = "MANUAL K" if snapshot.manual_gain else "AUTO LQR"
+        mode = (
+            "CASCADE LOCAL"
+            if snapshot.cascade_mode
+            else "MANUAL K" if snapshot.manual_gain else "AUTO LQR"
+        )
         min_zeta = self._minimum_damping(snapshot.poles)
 
         axis.text(
@@ -582,7 +589,7 @@ class PoleDashboard:
         axis = self.gain_axis
         axis.clear()
         self._style_panel_axis(axis)
-        axis.set_title("Active feedback gain", color=WHITE, fontsize=11.5, loc="left", pad=8)
+        axis.set_title("Active / local equivalent gain", color=WHITE, fontsize=11.5, loc="left", pad=8)
 
         effective = snapshot.gain_scale * snapshot.gain
         names = ["K_pitch", "K_rate", "K_pos", "K_vel"]
@@ -592,7 +599,7 @@ class PoleDashboard:
         ]
         table = axis.table(
             cellText=rows,
-            colLabels=["Term", "Configured", "scale × K"],
+            colLabels=["Term", "Published K", "scale × K"],
             cellLoc="right",
             colLoc="center",
             loc="center",
@@ -615,10 +622,16 @@ class PoleDashboard:
                     cell.get_text().set_color(BLUE)
                     cell.get_text().set_fontweight("bold")
 
+        footer = f"Ts = {snapshot.sample_time * 1000.0:.3f} ms"
+        if snapshot.cascade_mode and math.isfinite(snapshot.pitch_limit_deg):
+            footer += (
+                f"  |  local linearization; pitch_sp limit ±{snapshot.pitch_limit_deg:.1f}°"
+                f", slew {snapshot.pitch_slew_rate_deg_s:.1f}°/s"
+            )
         axis.text(
             0.04,
             0.035,
-            f"Ts = {snapshot.sample_time * 1000.0:.3f} ms",
+            footer,
             transform=axis.transAxes,
             fontsize=8.3,
             color=MUTED,
@@ -834,8 +847,11 @@ class PoleVisualizer(Node):
             manual_gain=bool(data[6] > 0.5),
             gain=np.asarray(data[7:11], dtype=float),
             poles=poles,
+            cascade_mode=bool(len(data) > 31 and data[31] > 0.5),
+            pitch_limit_deg=float(data[32]) if len(data) > 32 else math.nan,
+            pitch_slew_rate_deg_s=float(data[33]) if len(data) > 33 else math.nan,
         )
-        signature = tuple(_signature_value(value) for value in data[:31])
+        signature = tuple(_signature_value(value) for value in data[:34])
         if signature == self._last_rendered_signature:
             return
         self._snapshot = snapshot

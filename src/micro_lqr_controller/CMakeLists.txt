@@ -44,7 +44,6 @@ install(TARGETS
 install(DIRECTORY
   config
   launch
-  tools
   reference
   DESTINATION share/${PROJECT_NAME}
 )

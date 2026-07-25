@@ -53,6 +53,7 @@ struct PoleAnalysis
 
 struct ControllerParameters
 {
+  std::string control_mode{"lqr"};
   double sample_time{0.003};
   double gain_scale{1.0};
 
@@ -72,6 +73,14 @@ struct ControllerParameters
 
   bool use_manual_gain{false};
   RowVector4 manual_k{RowVector4::Zero()};
+
+  double cascade_attitude_k_pitch{0.80};
+  double cascade_attitude_k_pitch_rate{0.04};
+  double cascade_position_kp_rad_per_m{0.05};
+  double cascade_velocity_kd_rad_per_mps{0.05};
+  double cascade_position_to_pitch_sign{-1.0};
+  double cascade_pitch_limit_deg{2.0};
+  double cascade_pitch_slew_rate_deg_s{5.0};
 };
 
 LqrModel build_discrete_model_and_lqr(const ControllerParameters & p)
@@ -280,6 +289,15 @@ public:
     return value.bool_value;
   }
 
+  std::string get_string(const std::string & name) const
+  {
+    const auto & value = find(name);
+    if (value.type != rcl_interfaces::msg::ParameterType::PARAMETER_STRING) {
+      throw std::runtime_error(name + " is not a string");
+    }
+    return value.string_value;
+  }
+
 private:
   const rcl_interfaces::msg::ParameterValue & find(const std::string & name) const
   {
@@ -318,6 +336,7 @@ public:
     }
 
     parameter_names_ = {
+      "control_mode",
       "control_period_s",
       "lqr_gain_scale",
       "model.body_mass_kg",
@@ -339,7 +358,14 @@ public:
       "lqr.manual_k_pitch",
       "lqr.manual_k_pitch_rate",
       "lqr.manual_k_position",
-      "lqr.manual_k_velocity"
+      "lqr.manual_k_velocity",
+      "cascade.attitude_k_pitch",
+      "cascade.attitude_k_pitch_rate",
+      "cascade.position_kp_rad_per_m",
+      "cascade.velocity_kd_rad_per_mps",
+      "cascade.position_to_pitch_sign",
+      "cascade.pitch_limit_deg",
+      "cascade.pitch_slew_rate_deg_s"
     };
 
     const std::string service_name = controller_node_name_ + "/get_parameters";
@@ -406,6 +432,7 @@ private:
   void update_from_parameters(const ParameterReader & reader)
   {
     ControllerParameters p;
+    p.control_mode = reader.get_string("control_mode");
     p.sample_time = reader.get_double("control_period_s");
     p.gain_scale = reader.get_double("lqr_gain_scale");
 
@@ -434,28 +461,58 @@ private:
       reader.get_double("lqr.manual_k_position"),
       reader.get_double("lqr.manual_k_velocity");
 
-    const LqrModel model = build_discrete_model_and_lqr(p);
-    const RowVector4 active_k = p.use_manual_gain ? p.manual_k : model.automatic_k;
-    const PoleAnalysis analysis = analyze_closed_loop(
-      model.a_discrete, model.b_discrete, active_k, p.gain_scale, p.sample_time);
+    p.cascade_attitude_k_pitch = reader.get_double("cascade.attitude_k_pitch");
+    p.cascade_attitude_k_pitch_rate = reader.get_double("cascade.attitude_k_pitch_rate");
+    p.cascade_position_kp_rad_per_m = reader.get_double("cascade.position_kp_rad_per_m");
+    p.cascade_velocity_kd_rad_per_mps = reader.get_double("cascade.velocity_kd_rad_per_mps");
+    p.cascade_position_to_pitch_sign = reader.get_double("cascade.position_to_pitch_sign");
+    p.cascade_pitch_limit_deg = reader.get_double("cascade.pitch_limit_deg");
+    p.cascade_pitch_slew_rate_deg_s = reader.get_double("cascade.pitch_slew_rate_deg_s");
 
-    publish_analysis(p, model, active_k, analysis);
+    const LqrModel model = build_discrete_model_and_lqr(p);
+    RowVector4 active_k;
+    double active_gain_scale = p.gain_scale;
+    bool equivalent_manual_flag = p.use_manual_gain;
+    if (p.control_mode == "cascade") {
+      // Local unsaturated equivalent of:
+      // u=Ka*(pitch-pitch_sp)+Kd*rate,
+      // pitch_sp=sign*(Kx*x+Kv*v).
+      active_k <<
+        -p.cascade_attitude_k_pitch,
+        -p.cascade_attitude_k_pitch_rate,
+        p.cascade_attitude_k_pitch * p.cascade_position_to_pitch_sign *
+          p.cascade_position_kp_rad_per_m,
+        p.cascade_attitude_k_pitch * p.cascade_position_to_pitch_sign *
+          p.cascade_velocity_kd_rad_per_mps;
+      active_gain_scale = 1.0;
+      equivalent_manual_flag = true;
+    } else if (p.control_mode == "lqr") {
+      active_k = p.use_manual_gain ? p.manual_k : model.automatic_k;
+    } else {
+      throw std::runtime_error("control_mode must be cascade or lqr");
+    }
+
+    const PoleAnalysis analysis = analyze_closed_loop(
+      model.a_discrete, model.b_discrete, active_k, active_gain_scale, p.sample_time);
+
+    publish_analysis(
+      p, model, active_k, active_gain_scale, equivalent_manual_flag, analysis);
 
     const bool changed =
       !have_last_result_ ||
       std::abs(analysis.max_abs - last_max_abs_) > 1.0e-9 ||
       (active_k - last_k_).norm() > 1.0e-12 ||
-      std::abs(p.gain_scale - last_gain_scale_) > 1.0e-12;
+      std::abs(active_gain_scale - last_gain_scale_) > 1.0e-12;
     if (changed) {
       RCLCPP_INFO(
         get_logger(),
-        "%s K=[%+.6f %+.6f %+.6f %+.6f], scale=%.6f, max|pole|=%.9f, margin=%+.9f",
-        analysis.stable ? "STABLE" : "UNSTABLE",
+        "%s %s-local K=[%+.6f %+.6f %+.6f %+.6f], scale=%.6f, max|pole|=%.9f, margin=%+.9f",
+        analysis.stable ? "STABLE" : "UNSTABLE", p.control_mode.c_str(),
         active_k(0), active_k(1), active_k(2), active_k(3),
-        p.gain_scale, analysis.max_abs, 1.0 - analysis.max_abs);
+        active_gain_scale, analysis.max_abs, 1.0 - analysis.max_abs);
       have_last_result_ = true;
       last_max_abs_ = analysis.max_abs;
-      last_gain_scale_ = p.gain_scale;
+      last_gain_scale_ = active_gain_scale;
       last_k_ = active_k;
     }
   }
@@ -464,18 +521,20 @@ private:
     const ControllerParameters & p,
     const LqrModel & model,
     const RowVector4 & active_k,
+    const double active_gain_scale,
+    const bool equivalent_manual_flag,
     const PoleAnalysis & analysis)
   {
     std_msgs::msg::Float64MultiArray message;
-    message.data.reserve(31);
+    message.data.reserve(34);
 
     message.data.push_back(kSchemaVersion);                         // 0
     message.data.push_back(analysis.stable ? 1.0 : 0.0);           // 1
     message.data.push_back(analysis.max_abs);                      // 2
     message.data.push_back(1.0 - analysis.max_abs);                // 3 radial margin
-    message.data.push_back(p.gain_scale);                          // 4
+    message.data.push_back(active_gain_scale);                    // 4
     message.data.push_back(p.sample_time);                         // 5
-    message.data.push_back(p.use_manual_gain ? 1.0 : 0.0);        // 6
+    message.data.push_back(equivalent_manual_flag ? 1.0 : 0.0);   // 6
     message.data.push_back(active_k(0));                           // 7
     message.data.push_back(active_k(1));                           // 8
     message.data.push_back(active_k(2));                           // 9
@@ -488,6 +547,11 @@ private:
       message.data.push_back(analysis.damping_ratios[i]);
       message.data.push_back(analysis.damped_frequencies_hz[i]);
     }
+
+    // Optional extension; old visualizers safely ignore values after index 30.
+    message.data.push_back(p.control_mode == "cascade" ? 1.0 : 0.0);  // 31
+    message.data.push_back(p.cascade_pitch_limit_deg);                 // 32
+    message.data.push_back(p.cascade_pitch_slew_rate_deg_s);           // 33
 
     (void)model;
     pole_pub_->publish(message);

@@ -16,14 +16,18 @@ for topic in \
   /ecat/sn2031674/app3/write \
   /ecat/sn2031674/app4/read \
   /ecat/sn2031674/app4/write \
-  /micro_lqr/debug
+  /micro_lqr/debug \
+  /micro_lqr/poles
 do
   printf '%-38s ' "$topic"
   ros2 topic type "$topic" 2>/dev/null || echo "NOT FOUND"
 done
 
 echo
-echo "=== Controller parameters ==="
+echo "=== Controller architecture ==="
+ros2 param get /micro_lqr_controller control_mode || true
 ros2 param get /micro_lqr_controller dry_run || true
 ros2 param get /micro_lqr_controller output_gain_sign || true
 ros2 param get /micro_lqr_controller torque_limit || true
+ros2 param get /micro_lqr_controller cascade.pitch_limit_deg || true
+ros2 param get /micro_lqr_controller cascade.outer_velocity_filter_hz || true

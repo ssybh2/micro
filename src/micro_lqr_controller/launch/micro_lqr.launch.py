@@ -20,7 +20,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "config",
             default_value=default_config,
-            description="Path to the standard LQR controller YAML file",
+            description="Path to the cascade/LQR controller YAML file",
         ),
         DeclareLaunchArgument(
             "show_poles",
@@ -64,7 +64,7 @@ def generate_launch_description():
             condition=IfCondition(show_poles),
             parameters=[{
                 "pole_topic": pole_topic,
-                "window_title": "Micro LQR closed-loop poles",
+                "window_title": "Micro cascade local closed-loop poles",
             }],
         ),
     ])
