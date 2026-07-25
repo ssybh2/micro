@@ -31,9 +31,23 @@ micro_lqr_controller:
     arm_switch_value: 3
     disable_switch_value: 2
 
-    enable_velocity_command: false
-    max_target_velocity: 0.30
+    # ---------------- DJI RC drive mapping ----------------
+    # EcatV2 ReadDJIRC fields are normalized to [-1, 1].
+    # right_y commands forward/backward target velocity.
+    # left_x commands target yaw rate. No yaw angle is remembered.
+    enable_velocity_command: true
+    max_target_velocity: 0.20               # m/s at full right_y
+    enable_yaw_rate_command: true
+    max_target_yaw_rate_rad_s: 0.80          # rad/s at full left_x (~45.8 deg/s)
     rc_deadband: 0.08
+
+    # Flip these only if a stick direction is opposite to the desired motion.
+    rc.forward_sign: 1.0
+    rc.yaw_sign: 1.0
+
+    # Command ramps protect the balance loop from step inputs.
+    rc.velocity_slew_rate_mps2: 0.60
+    rc.yaw_rate_slew_rate_rad_s2: 3.0
 
     # ---------------- Hardware signs ----------------
     output_gain_sign: -1.0
@@ -48,8 +62,9 @@ micro_lqr_controller:
 
     # ---------------- Yaw-rate damping ----------------
     # This loop NEVER stores or controls yaw angle.
-    # yaw_rate_setpoint is permanently zero:
-    #   error = 0 - filtered angular_velocity.z
+    # With centered left_x, yaw_rate_setpoint is zero and it damps disturbances.
+    # With left_x command, it tracks the requested yaw rate:
+    #   error = target_yaw_rate - filtered angular_velocity.z
     #   yaw differential = output_sign * (Kp*error - Kd*yaw_acceleration)
     # Positive differential adds physical forward torque to the left wheel and
     # subtracts the same amount from the right wheel.

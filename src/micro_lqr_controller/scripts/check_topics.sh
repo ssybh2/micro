@@ -29,6 +29,12 @@ ros2 param get /micro_lqr_controller control_mode || true
 ros2 param get /micro_lqr_controller dry_run || true
 ros2 param get /micro_lqr_controller output_gain_sign || true
 ros2 param get /micro_lqr_controller torque_limit || true
+ros2 param get /micro_lqr_controller enable_velocity_command || true
+ros2 param get /micro_lqr_controller max_target_velocity || true
+ros2 param get /micro_lqr_controller enable_yaw_rate_command || true
+ros2 param get /micro_lqr_controller max_target_yaw_rate_rad_s || true
+ros2 param get /micro_lqr_controller rc.forward_sign || true
+ros2 param get /micro_lqr_controller rc.yaw_sign || true
 ros2 param get /micro_lqr_controller cascade.pitch_limit_deg || true
 ros2 param get /micro_lqr_controller cascade.outer_velocity_filter_hz || true
 ros2 param get /micro_lqr_controller yaw.enable || true

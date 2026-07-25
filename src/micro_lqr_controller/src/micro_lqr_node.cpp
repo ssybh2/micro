@@ -50,6 +50,13 @@ double apply_continuous_deadband(const double value, const double deadband)
   return std::copysign(magnitude - deadband, value);
 }
 
+double shape_unit_stick(const double value, const double deadband)
+{
+  const double clamped = clamp_value(value, -1.0, 1.0);
+  const double after_deadband = apply_continuous_deadband(clamped, deadband);
+  return after_deadband / std::max(1.0 - deadband, 1.0e-6);
+}
+
 double sign_or_throw(const double value, const std::string & name)
 {
   if (!std::isfinite(value) || std::abs(std::abs(value) - 1.0) > 1.0e-9) {
@@ -216,7 +223,8 @@ struct RcSample
 {
   bool online{false};
   std::uint8_t right_switch{0};
-  double left_y{0.0};
+  double right_y{0.0};
+  double left_x{0.0};
   rclcpp::Time received_time{0, 0, RCL_ROS_TIME};
   bool received{false};
 };
@@ -446,6 +454,16 @@ struct DebugSample
   double right_physical_torque{0.0};
   double left_motor_command{0.0};
   double right_motor_command{0.0};
+
+  // DJI RC drive extension. right_y commands translation; left_x commands yaw rate.
+  double rc_right_y_raw{0.0};
+  double rc_left_x_raw{0.0};
+  double rc_forward_shaped{0.0};
+  double rc_yaw_shaped{0.0};
+  double rc_velocity_command{0.0};
+  double rc_yaw_rate_command{0.0};
+  double rc_velocity_slew_limited_flag{0.0};
+  double rc_yaw_slew_limited_flag{0.0};
 };
 
 }  // namespace
@@ -484,7 +502,8 @@ public:
         std::lock_guard<std::mutex> lock(data_mutex_);
         rc_.online = msg->online != 0U;
         rc_.right_switch = msg->right_switch;
-        rc_.left_y = msg->left_y;
+        rc_.right_y = msg->right_y;
+        rc_.left_x = msg->left_x;
         rc_.received_time = now();
         rc_.received = true;
       });
@@ -528,7 +547,13 @@ public:
       calibrate_switch_value_, arm_switch_value_, disable_switch_value_);
     RCLCPP_INFO(
       get_logger(),
-      "yaw-rate damping: enabled=%s; no angle hold; Kp=%.5f Nm/(rad/s) per wheel; "
+      "DJI RC mapping: right_y -> target velocity (enabled=%s, max=%.3f m/s, sign=%+.0f); "
+      "left_x -> target yaw rate (enabled=%s, max=%.3f rad/s, sign=%+.0f)",
+      enable_velocity_command_ ? "true" : "false", max_target_velocity_, rc_forward_sign_,
+      enable_yaw_rate_command_ ? "true" : "false", max_target_yaw_rate_rad_s_, rc_yaw_sign_);
+    RCLCPP_INFO(
+      get_logger(),
+      "yaw-rate controller: enabled=%s; no angle hold; Kp=%.5f Nm/(rad/s) per wheel; "
       "deadband=%.4f rad/s; diff_limit=%.4f Nm; imu_sign=%+.0f output_sign=%+.0f",
       yaw_enable_ ? "true" : "false", yaw_rate_kp_per_wheel_nm_per_rad_s_,
       yaw_rate_deadband_rad_s_, yaw_differential_torque_limit_nm_,
@@ -583,9 +608,19 @@ private:
     arm_switch_value_ = declare_parameter<int>("arm_switch_value", 3);
     disable_switch_value_ = declare_parameter<int>("disable_switch_value", 2);
 
-    enable_velocity_command_ = declare_parameter<bool>("enable_velocity_command", false);
-    max_target_velocity_ = declare_parameter<double>("max_target_velocity", 0.30);
+    enable_velocity_command_ = declare_parameter<bool>("enable_velocity_command", true);
+    max_target_velocity_ = declare_parameter<double>("max_target_velocity", 0.20);
+    enable_yaw_rate_command_ = declare_parameter<bool>("enable_yaw_rate_command", true);
+    max_target_yaw_rate_rad_s_ = declare_parameter<double>("max_target_yaw_rate_rad_s", 0.80);
     rc_deadband_ = declare_parameter<double>("rc_deadband", 0.08);
+    rc_forward_sign_ = sign_or_throw(
+      declare_parameter<double>("rc.forward_sign", 1.0), "rc.forward_sign");
+    rc_yaw_sign_ = sign_or_throw(
+      declare_parameter<double>("rc.yaw_sign", 1.0), "rc.yaw_sign");
+    rc_velocity_slew_rate_mps2_ = declare_parameter<double>(
+      "rc.velocity_slew_rate_mps2", 0.60);
+    rc_yaw_rate_slew_rate_rad_s2_ = declare_parameter<double>(
+      "rc.yaw_rate_slew_rate_rad_s2", 3.0);
 
     output_gain_sign_ = sign_or_throw(
       declare_parameter<double>("output_gain_sign", 1.0), "output_gain_sign");
@@ -608,7 +643,8 @@ private:
       declare_parameter<double>("pitch_rate_compensation_sign", 1.0),
       "pitch_rate_compensation_sign");
 
-    // Pure yaw-rate damping: target yaw rate is always zero. No yaw angle is stored.
+    // Yaw-rate controller: target is zero with centered left_x, or an RC yaw-rate command.
+    // No yaw angle is stored, so releasing the stick never returns to an old heading.
     yaw_enable_ = declare_parameter<bool>("yaw.enable", true);
     yaw_imu_rate_sign_ = sign_or_throw(
       declare_parameter<double>("yaw.imu_rate_sign", 1.0), "yaw.imu_rate_sign");
@@ -727,6 +763,14 @@ private:
     }
     if (!std::isfinite(rc_deadband_) || rc_deadband_ < 0.0 || rc_deadband_ >= 1.0) {
       throw std::runtime_error("rc_deadband must be in [0,1)");
+    }
+    if (
+      !std::isfinite(max_target_velocity_) || max_target_velocity_ < 0.0 ||
+      !std::isfinite(max_target_yaw_rate_rad_s_) || max_target_yaw_rate_rad_s_ < 0.0 ||
+      !std::isfinite(rc_velocity_slew_rate_mps2_) || rc_velocity_slew_rate_mps2_ <= 0.0 ||
+      !std::isfinite(rc_yaw_rate_slew_rate_rad_s2_) || rc_yaw_rate_slew_rate_rad_s2_ <= 0.0)
+    {
+      throw std::runtime_error("RC command limits must be non-negative and slew rates positive");
     }
     if (
       !std::isfinite(yaw_rate_kp_per_wheel_nm_per_rad_s_) ||
@@ -909,6 +953,9 @@ private:
   {
     target_position_m_ = 0.0;
     target_velocity_mps_ = 0.0;
+    target_yaw_rate_rad_s_ = 0.0;
+    commanded_target_velocity_mps_ = 0.0;
+    commanded_target_yaw_rate_rad_s_ = 0.0;
     last_position_m_ = 0.0;
     position_fd_initialized_ = false;
     control_time_initialized_ = false;
@@ -962,6 +1009,10 @@ private:
     cascade_position_integral_m_s_ = 0.0;
     yaw_differential_command_nm_ = 0.0;
     yaw_rate_initialized_ = false;
+    target_velocity_mps_ = 0.0;
+    target_yaw_rate_rad_s_ = 0.0;
+    commanded_target_velocity_mps_ = 0.0;
+    commanded_target_yaw_rate_rad_s_ = 0.0;
     if (require_switch_cycle) {
       arm_transition_required_ = true;
     }
@@ -1015,6 +1066,9 @@ private:
     target_position_m_ = wheel_radius_m_ * (
       mean_relative_angle + pitch_position_compensation_sign_ * pitch);
     target_velocity_mps_ = 0.0;
+    target_yaw_rate_rad_s_ = 0.0;
+    commanded_target_velocity_mps_ = 0.0;
+    commanded_target_yaw_rate_rad_s_ = 0.0;
     pitch_filter_.reset(pitch);
     pitch_rate_filter_.reset(pitch_rate_raw);
     wheel_velocity_filter_.reset(mean_relative_rate_raw);
@@ -1035,18 +1089,40 @@ private:
       pitch_rate_raw, yaw_rate_raw, dry_run_ ? "true" : "false");
   }
 
-  double process_rc_velocity_command() const
+  double process_rc_velocity_command(const double actual_dt, DebugSample & debug)
   {
-    if (!enable_velocity_command_) {
-      return 0.0;
-    }
-    double command = clamp_value(rc_.left_y, -1.0, 1.0);
-    if (std::abs(command) <= rc_deadband_) {
-      return 0.0;
-    }
-    const double scaled =
-      (std::abs(command) - rc_deadband_) / std::max(1.0 - rc_deadband_, 1.0e-6);
-    return std::copysign(scaled * max_target_velocity_, command);
+    const double raw = clamp_value(rc_.right_y, -1.0, 1.0);
+    const double shaped = rc_forward_sign_ * shape_unit_stick(raw, rc_deadband_);
+    const double requested = enable_velocity_command_ ? shaped * max_target_velocity_ : 0.0;
+    const double max_step = rc_velocity_slew_rate_mps2_ * actual_dt;
+    const double delta = clamp_value(
+      requested - commanded_target_velocity_mps_, -max_step, max_step);
+    commanded_target_velocity_mps_ += delta;
+
+    debug.rc_right_y_raw = raw;
+    debug.rc_forward_shaped = shaped;
+    debug.rc_velocity_command = commanded_target_velocity_mps_;
+    debug.rc_velocity_slew_limited_flag =
+      std::abs(requested - commanded_target_velocity_mps_) > 1.0e-9 ? 1.0 : 0.0;
+    return commanded_target_velocity_mps_;
+  }
+
+  double process_rc_yaw_rate_command(const double actual_dt, DebugSample & debug)
+  {
+    const double raw = clamp_value(rc_.left_x, -1.0, 1.0);
+    const double shaped = rc_yaw_sign_ * shape_unit_stick(raw, rc_deadband_);
+    const double requested = enable_yaw_rate_command_ ? shaped * max_target_yaw_rate_rad_s_ : 0.0;
+    const double max_step = rc_yaw_rate_slew_rate_rad_s2_ * actual_dt;
+    const double delta = clamp_value(
+      requested - commanded_target_yaw_rate_rad_s_, -max_step, max_step);
+    commanded_target_yaw_rate_rad_s_ += delta;
+
+    debug.rc_left_x_raw = raw;
+    debug.rc_yaw_shaped = shaped;
+    debug.rc_yaw_rate_command = commanded_target_yaw_rate_rad_s_;
+    debug.rc_yaw_slew_limited_flag =
+      std::abs(requested - commanded_target_yaw_rate_rad_s_) > 1.0e-9 ? 1.0 : 0.0;
+    return commanded_target_yaw_rate_rad_s_;
   }
 
   double calculate_cascade_torque(
@@ -1141,6 +1217,7 @@ private:
 
   double calculate_yaw_differential_torque(
     const double yaw_rate_raw,
+    const double target_yaw_rate_rad_s,
     const double per_wheel_common_torque,
     const double actual_dt,
     DebugSample & debug)
@@ -1157,9 +1234,10 @@ private:
     const double yaw_acceleration_filtered =
       yaw_acceleration_filter_.update(yaw_acceleration_raw, actual_dt);
 
-    const double yaw_rate_for_control = apply_continuous_deadband(
-      yaw_rate_filtered, yaw_rate_deadband_rad_s_);
-    const double yaw_rate_error = -yaw_rate_for_control;
+    const bool yaw_command_active = std::abs(target_yaw_rate_rad_s) > 1.0e-12;
+    const double yaw_rate_for_control = yaw_command_active ? yaw_rate_filtered :
+      apply_continuous_deadband(yaw_rate_filtered, yaw_rate_deadband_rad_s_);
+    const double yaw_rate_error = target_yaw_rate_rad_s - yaw_rate_for_control;
     const double yaw_differential_raw = yaw_enable_ ? yaw_output_sign_ * (
       yaw_rate_kp_per_wheel_nm_per_rad_s_ * yaw_rate_error -
       yaw_rate_kd_per_wheel_nm_per_rad_s2_ * yaw_acceleration_filtered) : 0.0;
@@ -1173,9 +1251,9 @@ private:
       yaw_differential_raw, -yaw_allowed, yaw_allowed);
 
     const bool zero_rate_release =
-      std::abs(yaw_rate_for_control) <= 1.0e-12;
+      !yaw_command_active && std::abs(yaw_rate_for_control) <= 1.0e-12;
     if (!yaw_enable_ || zero_rate_release) {
-      // No yaw-angle memory: when yaw rate disappears, differential torque disappears immediately.
+      // No yaw-angle memory: centered stick + stopped yaw means immediate zero differential.
       yaw_differential_command_nm_ = 0.0;
     } else {
       const double max_yaw_step = yaw_differential_slew_rate_nm_s_ * actual_dt;
@@ -1332,7 +1410,8 @@ private:
       velocity_blend_ * velocity_motor_based +
       (1.0 - velocity_blend_) * velocity_from_position;
 
-    target_velocity_mps_ = process_rc_velocity_command();
+    target_velocity_mps_ = process_rc_velocity_command(actual_dt, debug);
+    target_yaw_rate_rad_s_ = process_rc_yaw_rate_command(actual_dt, debug);
     target_position_m_ += target_velocity_mps_ * actual_dt;
 
     const double position_error = position_m - target_position_m_;
@@ -1355,7 +1434,7 @@ private:
       std::abs(signed_total_torque - total_torque_after_limit) > 1.0e-9;
     const double per_wheel_common_torque = 0.5 * total_torque_after_limit;
     const double yaw_differential_torque = calculate_yaw_differential_torque(
-      yaw_rate_raw, per_wheel_common_torque, actual_dt, debug);
+      yaw_rate_raw, target_yaw_rate_rad_s_, per_wheel_common_torque, actual_dt, debug);
 
     // Positive yaw differential means left physical wheel torque increases and
     // right physical wheel torque decreases. Motor installation signs are applied last.
@@ -1405,13 +1484,15 @@ private:
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 100,
         "pitch=%+.2fdeg rate=%+.3f x=%+.4f ex=%+.4f v=%+.4f vf=%+.4f "
-        "pitch_sp=%+.2fdeg uT=%+.4f common=%+.4f yawRate=%+.3f yawDiff=%+.4f "
+        "pitch_sp=%+.2fdeg uT=%+.4f common=%+.4f rcRY=%+.2f vSp=%+.3f "
+        "rcLX=%+.2f yawSp=%+.3f yawRate=%+.3f yawDiff=%+.4f "
         "Lphys=%+.4f Rphys=%+.4f sat=%d outer_sat=%d yaw_lim=%d",
         pitch * 180.0 / kPi, pitch_rate, position_m, position_error,
         velocity_mps, debug.outer_velocity_filtered,
         debug.pitch_setpoint_command * 180.0 / kPi,
-        u_total_unsaturated, per_wheel_common_torque, debug.yaw_rate_filtered,
-        debug.yaw_differential_command, debug.left_physical_torque,
+        u_total_unsaturated, per_wheel_common_torque, debug.rc_right_y_raw,
+        target_velocity_mps_, debug.rc_left_x_raw, target_yaw_rate_rad_s_,
+        debug.yaw_rate_filtered, debug.yaw_differential_command, debug.left_physical_torque,
         debug.right_physical_torque, saturated ? 1 : 0,
         debug.outer_saturation_flag > 0.5 ? 1 : 0,
         debug.yaw_limited_flag > 0.5 ? 1 : 0);
@@ -1522,7 +1603,15 @@ private:
       sample.left_physical_torque,                // 61
       sample.right_physical_torque,               // 62
       sample.left_motor_command,                  // 63
-      sample.right_motor_command                  // 64
+      sample.right_motor_command,                 // 64
+      sample.rc_right_y_raw,                      // 65
+      sample.rc_left_x_raw,                       // 66
+      sample.rc_forward_shaped,                   // 67
+      sample.rc_yaw_shaped,                       // 68
+      sample.rc_velocity_command,                 // 69
+      sample.rc_yaw_rate_command,                 // 70
+      sample.rc_velocity_slew_limited_flag,       // 71
+      sample.rc_yaw_slew_limited_flag             // 72
     };
     debug_pub_->publish(message);
   }
@@ -1539,6 +1628,8 @@ private:
     const double old_output_gain_sign = output_gain_sign_;
     const bool old_enable_velocity_command = enable_velocity_command_;
     const double old_max_target_velocity = max_target_velocity_;
+    const bool old_enable_yaw_rate_command = enable_yaw_rate_command_;
+    const double old_max_target_yaw_rate = max_target_yaw_rate_rad_s_;
     bool force_disarm = false;
 
     try {
@@ -1559,6 +1650,12 @@ private:
         } else if (name == "max_target_velocity") {
           max_target_velocity_ = parameter.as_double();
           force_disarm = true;
+        } else if (name == "enable_yaw_rate_command") {
+          enable_yaw_rate_command_ = parameter.as_bool();
+          force_disarm = true;
+        } else if (name == "max_target_yaw_rate_rad_s") {
+          max_target_yaw_rate_rad_s_ = parameter.as_double();
+          force_disarm = true;
         } else {
           throw std::runtime_error(name + " requires node restart and YAML edit");
         }
@@ -1570,6 +1667,8 @@ private:
       output_gain_sign_ = old_output_gain_sign;
       enable_velocity_command_ = old_enable_velocity_command;
       max_target_velocity_ = old_max_target_velocity;
+      enable_yaw_rate_command_ = old_enable_yaw_rate_command;
+      max_target_yaw_rate_rad_s_ = old_max_target_yaw_rate;
       result.successful = false;
       result.reason = exception.what();
       return result;
@@ -1580,6 +1679,11 @@ private:
       arm_transition_required_ = true;
       cascade_pitch_setpoint_rad_ = 0.0;
       cascade_position_integral_m_s_ = 0.0;
+      yaw_differential_command_nm_ = 0.0;
+      target_velocity_mps_ = 0.0;
+      target_yaw_rate_rad_s_ = 0.0;
+      commanded_target_velocity_mps_ = 0.0;
+      commanded_target_yaw_rate_rad_s_ = 0.0;
       publish_motor_commands(false, 0.0, 0.0);
     }
     return result;
@@ -1624,9 +1728,15 @@ private:
   int calibrate_switch_value_{1};
   int arm_switch_value_{3};
   int disable_switch_value_{2};
-  bool enable_velocity_command_{false};
-  double max_target_velocity_{0.30};
+  bool enable_velocity_command_{true};
+  double max_target_velocity_{0.20};
+  bool enable_yaw_rate_command_{true};
+  double max_target_yaw_rate_rad_s_{0.80};
   double rc_deadband_{0.08};
+  double rc_forward_sign_{1.0};
+  double rc_yaw_sign_{1.0};
+  double rc_velocity_slew_rate_mps2_{0.60};
+  double rc_yaw_rate_slew_rate_rad_s2_{3.0};
 
   double output_gain_sign_{1.0};
   double left_motor_sign_{-1.0};
@@ -1713,6 +1823,9 @@ private:
 
   double target_position_m_{0.0};
   double target_velocity_mps_{0.0};
+  double target_yaw_rate_rad_s_{0.0};
+  double commanded_target_velocity_mps_{0.0};
+  double commanded_target_yaw_rate_rad_s_{0.0};
   double last_position_m_{0.0};
   bool position_fd_initialized_{false};
   bool control_time_initialized_{false};

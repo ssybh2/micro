@@ -3,11 +3,14 @@
 ## Requirement implemented
 
 This controller does **not** remember, integrate, or regulate a yaw angle.
-The yaw-rate setpoint is permanently zero:
+The yaw-rate setpoint comes from `ReadDJIRC.left_x`. With the stick centered it is zero:
 
 ```text
-yaw_rate_error = 0 - filtered_imu_angular_velocity_z
+yaw_rate_error = target_yaw_rate - filtered_imu_angular_velocity_z
 ```
+
+Releasing the stick therefore requests zero yaw rate, damps the remaining rotation, and then
+accepts whatever yaw angle the robot has reached.
 
 The differential wheel torque is:
 

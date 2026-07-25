@@ -59,7 +59,7 @@ Type: `std_msgs/msg/Float64MultiArray`
 52 yaw_rate_raw (rad/s, after yaw.imu_rate_sign)
 53 yaw_rate_filtered (rad/s)
 54 yaw_rate_for_control (rad/s, after continuous deadband)
-55 yaw_rate_error (rad/s, always 0 - measured rate)
+55 yaw_rate_error (rad/s, target yaw rate - measured rate)
 56 yaw_acceleration_filtered (rad/s^2)
 57 yaw_differential_raw (N*m per wheel)
 58 yaw_differential_command (N*m per wheel)
@@ -70,3 +70,12 @@ Type: `std_msgs/msg/Float64MultiArray`
 63 left_motor_command (N*m, after installation sign)
 64 right_motor_command (N*m, after installation sign)
 
+
+65 rc_right_y_raw ([-1,1], EcatV2 ReadDJIRC.right_y)
+66 rc_left_x_raw ([-1,1], EcatV2 ReadDJIRC.left_x)
+67 rc_forward_shaped (after deadband and rc.forward_sign)
+68 rc_yaw_shaped (after deadband and rc.yaw_sign)
+69 rc_velocity_command (m/s, after slew limiting)
+70 rc_yaw_rate_command (rad/s, after slew limiting)
+71 rc_velocity_slew_limited_flag
+72 rc_yaw_slew_limited_flag

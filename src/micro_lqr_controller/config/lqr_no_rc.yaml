@@ -1,5 +1,6 @@
 micro_lqr_controller:
   ros__parameters:
+    # Rollback profile: keep balance and yaw disturbance damping, disable stick driving.
     # ---------------- ROS / EtherCAT topics ----------------
     imu_topic: "/ecat/sn2031674/app1/read"
     rc_topic: "/ecat/sn2031674/app2/read"
@@ -15,7 +16,7 @@ micro_lqr_controller:
 
     # New yaw differential direction is hardware-dependent.
     # Keep true for the first yaw sign/noise test, then change to false.
-    dry_run: false
+    dry_run: true
     torque_limit: 0.12
     hard_torque_limit: 0.45
     lqr_gain_scale: 0.4
@@ -35,9 +36,9 @@ micro_lqr_controller:
     # EcatV2 ReadDJIRC fields are normalized to [-1, 1].
     # right_y commands forward/backward target velocity.
     # left_x commands target yaw rate. No yaw angle is remembered.
-    enable_velocity_command: true
+    enable_velocity_command: false
     max_target_velocity: 0.20               # m/s at full right_y
-    enable_yaw_rate_command: true
+    enable_yaw_rate_command: false
     max_target_yaw_rate_rad_s: 0.80          # rad/s at full left_x (~45.8 deg/s)
     rc_deadband: 0.08
 
@@ -80,7 +81,7 @@ micro_lqr_controller:
 
     # Per-wheel differential torque coefficients.
     # Start conservatively. Kd is optional and disabled by default.
-    yaw.rate_kp_per_wheel_nm_per_rad_s: 0.033
+    yaw.rate_kp_per_wheel_nm_per_rad_s: 0.015
     yaw.rate_kd_per_wheel_nm_per_rad_s2: 0.0
 
     # Continuous deadband: output is exactly zero inside this yaw-rate band.
@@ -121,16 +122,16 @@ micro_lqr_controller:
 
     # ---------------- Existing cascade controller ----------------
     # Values below preserve the current repository effect.
-    cascade.attitude_k_pitch: 0.65
-    cascade.attitude_k_pitch_rate: 0.048
-    cascade.position_kp_rad_per_m: 0.23
-    cascade.velocity_kd_rad_per_mps: 0.17
+    cascade.attitude_k_pitch: 0.70
+    cascade.attitude_k_pitch_rate: 0.04
+    cascade.position_kp_rad_per_m: 0.22
+    cascade.velocity_kd_rad_per_mps: 0.16
     cascade.position_ki_rad_per_m_s: 0.0
     cascade.enable_integral: false
     cascade.integral_limit_m_s: 0.20
     cascade.position_to_pitch_sign: -1.0
     cascade.pitch_limit_deg: 5.0
-    cascade.pitch_slew_rate_deg_s: 100.0
+    cascade.pitch_slew_rate_deg_s: 50.0
     cascade.position_error_limit_m: 0.50
     cascade.velocity_error_limit_mps: 0.80
     cascade.outer_velocity_filter_hz: 5.0
