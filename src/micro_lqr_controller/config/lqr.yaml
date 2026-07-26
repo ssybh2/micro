@@ -43,7 +43,7 @@ micro_lqr_controller:
 
     # Flip these only if a stick direction is opposite to the desired motion.
     rc.forward_sign: 1.0
-    rc.yaw_sign: 1.0
+    rc.yaw_sign: -1.0
 
     # Command ramps protect the balance loop from step inputs.
     rc.velocity_slew_rate_mps2: 0.60
@@ -140,6 +140,6 @@ micro_lqr_controller:
     pitch_filter_hz: 40.0
     pitch_rate_filter_hz: 25.0
     wheel_velocity_filter_hz: 30.0
-    velocity_blend: 1.0
+    velocity_blend: 0.2
     velocity_mismatch_warn_mps: 0.50
     auto_calibrate_on_first_valid_data: false
