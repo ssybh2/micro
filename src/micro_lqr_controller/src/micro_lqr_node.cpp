@@ -676,6 +676,11 @@ private:
       RCLCPP_ERROR(get_logger(), "Calibration rejected: invalid IMU quaternion");
       return;
     }
+    // 当前四元数对应的未归零IMU角度。
+    // 你的机器人将IMU roll轴作为车身pitch使用。
+    const double stored_abs_pitch_rad =
+      imu_angle_sign_ * quaternion_roll(current);
+
     imu_zero_ = current;
     imu_zero_valid_ = true;
     left_unwrapper_.reset(left_motor_.position);
@@ -695,7 +700,18 @@ private:
     armed_ = false;
     arm_transition_required_ = true;
     RCLCPP_INFO(
-      get_logger(), "Zero calibrated; auto_trim=%+.3fdeg",
+      get_logger(),
+      "IMU ZERO STORED: switch=%u abs_pitch=%+.3fdeg "
+      "gyro_x=%+.4frad/s "
+      "q_zero=[w=%.8f x=%.8f y=%.8f z=%.8f] "
+      "auto_trim=%+.3fdeg",
+      static_cast<unsigned int>(rc_.right_switch),
+      stored_abs_pitch_rad * 180.0 / kPi,
+      imu_rate_sign_ * imu_.gyro_x,
+      imu_zero_.w,
+      imu_zero_.x,
+      imu_zero_.y,
+      imu_zero_.z,
       auto_trim_rad_ * 180.0 / kPi);
   }
 
@@ -721,6 +737,42 @@ private:
     }
     const double pitch_rate_raw = imu_rate_sign_ * imu_.gyro_x;
     const double yaw_rate_raw = yaw_imu_rate_sign_ * imu_.gyro_z;
+
+    Quaternion arm_current_orientation = imu_.orientation;
+    if (!normalize_quaternion(arm_current_orientation)) {
+      RCLCPP_WARN(get_logger(), "Arm rejected: invalid current IMU quaternion");
+      arm_transition_required_ = true;
+      return;
+    }
+
+    const double stored_abs_pitch_rad =
+      imu_angle_sign_ * quaternion_roll(imu_zero_);
+    const double current_abs_pitch_rad =
+      imu_angle_sign_ * quaternion_roll(arm_current_orientation);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "ARM IMU CHECK: stored_abs=%+.3fdeg current_abs=%+.3fdeg "
+      "relative=%+.3fdeg rate=%+.4frad/s abs_difference=%+.3fdeg",
+      stored_abs_pitch_rad * 180.0 / kPi,
+      current_abs_pitch_rad * 180.0 / kPi,
+      pitch * 180.0 / kPi,
+      pitch_rate_raw,
+      (current_abs_pitch_rad - stored_abs_pitch_rad) * 180.0 / kPi);
+
+    RCLCPP_INFO(
+      get_logger(),
+      "ARM IMU QUAT: q_zero=[%.8f %.8f %.8f %.8f] "
+      "q_now=[%.8f %.8f %.8f %.8f]",
+      imu_zero_.w,
+      imu_zero_.x,
+      imu_zero_.y,
+      imu_zero_.z,
+      arm_current_orientation.w,
+      arm_current_orientation.x,
+      arm_current_orientation.y,
+      arm_current_orientation.z);
+
     if (std::abs(pitch) > arm_max_tilt_rad_ ||
       std::abs(pitch_rate_raw) > arm_max_pitch_rate_rad_s_)
     {
@@ -1052,6 +1104,15 @@ private:
 
     const int switch_value = static_cast<int>(rc_.right_switch);
     const bool switch_changed = switch_value != last_switch_value_;
+
+    if (switch_changed) {
+      RCLCPP_INFO(
+        get_logger(),
+        "RC RIGHT SWITCH: %d -> %d",
+        last_switch_value_,
+        switch_value);
+    }
+
     if (auto_calibrate_on_first_valid_data_ && !calibrated_) {calibrate_zero();}
     if (switch_changed && switch_value == calibrate_switch_value_) {calibrate_zero();}
     if (switch_value == disable_switch_value_) {
@@ -1064,6 +1125,37 @@ private:
 
     if (!armed_) {
       publish_motor_commands(false, 0.0, 0.0);
+
+      if (imu_zero_valid_) {
+        Quaternion current_orientation = imu_.orientation;
+        double relative_pitch_rad = 0.0;
+
+        if (normalize_quaternion(current_orientation) &&
+          calculate_raw_pitch(relative_pitch_rad))
+        {
+          const double stored_abs_pitch_rad =
+            imu_angle_sign_ * quaternion_roll(imu_zero_);
+          const double current_abs_pitch_rad =
+            imu_angle_sign_ * quaternion_roll(current_orientation);
+          const double pitch_rate_raw =
+            imu_rate_sign_ * imu_.gyro_x;
+
+          RCLCPP_INFO_THROTTLE(
+            get_logger(),
+            *get_clock(),
+            200,
+            "IMU HOLD: switch=%d stored_abs=%+.3fdeg "
+            "current_abs=%+.3fdeg relative=%+.3fdeg "
+            "rate=%+.4frad/s auto_trim=%+.3fdeg",
+            switch_value,
+            stored_abs_pitch_rad * 180.0 / kPi,
+            current_abs_pitch_rad * 180.0 / kPi,
+            relative_pitch_rad * 180.0 / kPi,
+            pitch_rate_raw,
+            auto_trim_rad_ * 180.0 / kPi);
+        }
+      }
+
       debug.manual_trim = manual_trim_rad_;
       debug.auto_trim = auto_trim_rad_;
       debug.total_trim = manual_trim_rad_ + auto_trim_rad_;
@@ -1158,6 +1250,38 @@ private:
         pitch, pitch_rate, position_error, velocity_error, debug);
     }
 
+    if (control_mode_ == "cascade") {
+      Quaternion current_orientation = imu_.orientation;
+
+      if (normalize_quaternion(current_orientation)) {
+        const double stored_abs_pitch_rad =
+          imu_angle_sign_ * quaternion_roll(imu_zero_);
+        const double current_abs_pitch_rad =
+          imu_angle_sign_ * quaternion_roll(current_orientation);
+        const double total_trim =
+          manual_trim_rad_ + auto_trim_rad_;
+
+        RCLCPP_INFO_THROTTLE(
+          get_logger(),
+          *get_clock(),
+          200,
+          "IMU LIVE: stored_abs=%+.3fdeg current_abs=%+.3fdeg "
+          "relative_raw=%+.3fdeg relative_filt=%+.3fdeg "
+          "rate=%+.4frad/s trim=%+.3fdeg correction=%+.3fdeg "
+          "reference=%+.3fdeg ex=%+.4fm v=%+.4fm/s",
+          stored_abs_pitch_rad * 180.0 / kPi,
+          current_abs_pitch_rad * 180.0 / kPi,
+          pitch_raw * 180.0 / kPi,
+          pitch * 180.0 / kPi,
+          pitch_rate,
+          total_trim * 180.0 / kPi,
+          cascade_pitch_setpoint_rad_ * 180.0 / kPi,
+          debug.full_pitch_reference * 180.0 / kPi,
+          position_error,
+          velocity_mps);
+      }
+    }
+
     const double max_total_torque = 2.0 * per_wheel_torque_limit_;
     double signed_total_torque = output_gain_sign_ * u_total_unsaturated;
     signed_total_torque = apply_stiction_compensation(
@@ -1225,7 +1349,7 @@ private:
       "pitch=%+.2fdeg ref=%+.2fdeg rate=%+.3f x=%+.4f ex=%+.4f "
       "v=%+.4f vfd=%+.4f vf=%+.4f trim=%+.2fdeg learn=%d uT=%+.4f common=%+.4f",
       pitch * 180.0 / kPi, debug.full_pitch_reference * 180.0 / kPi,
-      pitch_rate, position_m, position_error, velocity_mps,
+      pitch_rate, position_m * 100.0, position_error * 100, velocity_mps,
       velocity_from_position_filtered_mps_, debug.outer_velocity_filtered,
       debug.total_trim * 180.0 / kPi, auto_trim_learning_flag_ ? 1 : 0,
       u_total_unsaturated, common_torque);

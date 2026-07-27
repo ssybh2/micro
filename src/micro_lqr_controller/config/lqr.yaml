@@ -67,12 +67,12 @@ micro_lqr_controller:
     cascade.attitude_k_pitch: 0.65
     cascade.attitude_k_pitch_rate: 0.058
     cascade.position_kp_rad_per_m: 0.235
-    cascade.velocity_kd_rad_per_mps: 0.17
+    cascade.velocity_kd_rad_per_mps: 0.19
     cascade.position_ki_rad_per_m_s: 0.0
     cascade.enable_integral: false
     cascade.integral_limit_m_s: 0.20
     cascade.position_to_pitch_sign: -1.0
-    cascade.pitch_limit_deg: 5.0
+    cascade.pitch_limit_deg: 8.0
     cascade.pitch_slew_rate_deg_s: 30.0
     cascade.position_error_limit_m: 0.50
     cascade.velocity_error_limit_mps: 0.80
@@ -88,12 +88,12 @@ micro_lqr_controller:
     cascade.auto_trim.enable: true
     cascade.auto_trim.gain_rad_per_m_s: 0.020
     cascade.auto_trim.limit_deg: 4.0
-    cascade.auto_trim.position_deadband_m: 0.005
-    cascade.auto_trim.velocity_limit_mps: 0.025
-    cascade.auto_trim.pitch_rate_limit_rad_s: 0.10
+    cascade.auto_trim.position_deadband_m: 0.05
+    cascade.auto_trim.velocity_limit_mps: 0.25
+    cascade.auto_trim.pitch_rate_limit_rad_s: 0.20
     cascade.auto_trim.safe_pitch_deg: 6.0
-    cascade.auto_trim.max_position_error_m: 0.15
-    cascade.auto_trim.dwell_s: 0.50
+    cascade.auto_trim.max_position_error_m: 0.70
+    cascade.auto_trim.dwell_s: 0.25
     cascade.auto_trim.max_rate_deg_s: 0.10
     cascade.auto_trim.reset_on_calibrate: true
 
@@ -105,12 +105,12 @@ micro_lqr_controller:
     # 新增：位置差分速度独立低通。仅在左右编码器都有新样本时更新。
     position_velocity_filter_hz: 12.0
     # 0.6 = 60% 电机速度 + 40% 滤波后位置差分速度。
-    velocity_blend: 0.6
+    velocity_blend: 0.0
     velocity_mismatch_warn_mps: 0.50
     auto_calibrate_on_first_valid_data: false
 
     # 可选静摩擦补偿，首次测试保持 false。
-    stiction.enable: false
+    stiction.enable: true
     stiction.velocity_limit_mps: 0.015
     stiction.pitch_rate_limit_rad_s: 0.08
     stiction.position_error_m: 0.008
