@@ -7,14 +7,11 @@ micro_lqr_controller:
     right_motor_read_topic: "/ecat/sn2031674/app4/read"
     right_motor_write_topic: "/ecat/sn2031674/app4/write"
     debug_topic: "/micro_lqr/debug"
-
     control_mode: "cascade"
     control_period_s: 0.003
     dry_run: false
     torque_limit: 0.12
     hard_torque_limit: 0.45
-    lqr_gain_scale: 0.4
-
     arm_max_tilt_deg: 10.0
     arm_max_pitch_rate_rad_s: 0.30
     fall_cutoff_deg: 25.0
@@ -24,17 +21,15 @@ micro_lqr_controller:
     calibrate_switch_value: 1
     arm_switch_value: 3
     disable_switch_value: 2
-
-    enable_velocity_command: true
+    enable_velocity_command: false
     max_target_velocity: 0.20
-    enable_yaw_rate_command: true
+    enable_yaw_rate_command: false
     max_target_yaw_rate_rad_s: 0.80
     rc_deadband: 0.08
     rc.forward_sign: 1.0
     rc.yaw_sign: -1.0
     rc.velocity_slew_rate_mps2: 0.60
     rc.yaw_rate_slew_rate_rad_s2: 3.0
-
     output_gain_sign: -1.0
     left_motor_sign: -1.0
     right_motor_sign: 1.0
@@ -44,8 +39,7 @@ micro_lqr_controller:
     imu_rate_sign: 1.0
     pitch_position_compensation_sign: 1.0
     pitch_rate_compensation_sign: 1.0
-
-    yaw.enable: true
+    yaw.enable: false
     yaw.imu_rate_sign: 1.0
     yaw.output_sign: 1.0
     yaw.rate_kp_per_wheel_nm_per_rad_s: 0.033
@@ -55,36 +49,28 @@ micro_lqr_controller:
     yaw.acceleration_filter_hz: 8.0
     yaw.differential_torque_limit_nm: 0.025
     yaw.differential_slew_rate_nm_s: 0.50
-
     model.wheel_radius_m: 0.030
-
     lqr.use_manual_gain: true
     lqr.manual_k_pitch: -2.0
     lqr.manual_k_pitch_rate: -0.10
     lqr.manual_k_position: -0.55
     lqr.manual_k_velocity: -0.13
-
+    lqr_gain_scale: 0.4
     cascade.attitude_k_pitch: 0.65
     cascade.attitude_k_pitch_rate: 0.058
-    cascade.position_kp_rad_per_m: 0.235
-    cascade.velocity_kd_rad_per_mps: 0.17
+    cascade.position_kp_rad_per_m: 0.12
+    cascade.velocity_kd_rad_per_mps: 0.10
     cascade.position_ki_rad_per_m_s: 0.0
     cascade.enable_integral: false
     cascade.integral_limit_m_s: 0.20
     cascade.position_to_pitch_sign: -1.0
-    cascade.pitch_limit_deg: 5.0
-    cascade.pitch_slew_rate_deg_s: 30.0
+    cascade.pitch_limit_deg: 3.0
+    cascade.pitch_slew_rate_deg_s: 20.0
     cascade.position_error_limit_m: 0.50
     cascade.velocity_error_limit_mps: 0.80
     cascade.outer_velocity_filter_hz: 8.0
-
-    # Arm 时让参考姿态从当前姿态开始，避免突然跳到 0 度。
     cascade.arm_bumpless: true
-
-    # 固定 Trim：只补偿 IMU 安装角和固定结构偏置。
     cascade.pitch_trim_deg: 0.0
-
-    # 自动 Trim：用于质量块位置改变后的慢速平衡角学习。
     cascade.auto_trim.enable: true
     cascade.auto_trim.gain_rad_per_m_s: 0.020
     cascade.auto_trim.limit_deg: 4.0
@@ -96,20 +82,14 @@ micro_lqr_controller:
     cascade.auto_trim.dwell_s: 0.50
     cascade.auto_trim.max_rate_deg_s: 0.10
     cascade.auto_trim.reset_on_calibrate: true
-
     motor_position_wrap_half_range: 3.141592653589793
     pitch_filter_hz: 40.0
     pitch_rate_filter_hz: 25.0
     wheel_velocity_filter_hz: 30.0
-
-    # 新增：位置差分速度独立低通。仅在左右编码器都有新样本时更新。
     position_velocity_filter_hz: 12.0
-    # 0.6 = 60% 电机速度 + 40% 滤波后位置差分速度。
     velocity_blend: 0.6
     velocity_mismatch_warn_mps: 0.50
     auto_calibrate_on_first_valid_data: false
-
-    # 可选静摩擦补偿，首次测试保持 false。
     stiction.enable: false
     stiction.velocity_limit_mps: 0.015
     stiction.pitch_rate_limit_rad_s: 0.08
